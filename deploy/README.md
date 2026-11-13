@@ -31,6 +31,12 @@ private device hostname (and optional aliases) per line. The installer copies th
 since public DNS does not resolve private tailnet names reliably. This file contains addresses,
 not credentials. Use the real addresses reported by `tailscale status` on your own network.
 
+A Tailscale Serve listener can be bound specifically to the Tailscale interface and may not
+accept connections originating on a local Docker bridge. For the T3 server on the same host,
+its direct API (for example `http://<host-name>:3773/mcp`) can be reached from the desktop when
+the T3 server is configured to listen on the host network. Remote devices can use their private
+HTTPS MCP URLs. Verify the actual bind address and port before using either route.
+
 Private MCP connectivity still requires a supported MCP client and server authentication.
 Remembering a URL does not register an MCP connection. HTTP 401 means the server was reached and
 requires credentials; connection timeouts indicate a routing, DNS, firewall, or service issue.
