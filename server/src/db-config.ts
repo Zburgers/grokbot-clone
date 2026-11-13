@@ -18,8 +18,21 @@ addColumn('skills', 'description', "TEXT NOT NULL DEFAULT ''");
 addColumn('skills', 'updated_at', 'INTEGER');
 /** 'chat' = saved by the bot's remember tool, 'learned' = extracted by consolidation. */
 addColumn('memories', 'source', "TEXT NOT NULL DEFAULT 'chat'");
+addColumn('memories', 'status', "TEXT NOT NULL DEFAULT 'active'");
+addColumn('memories', 'kind', "TEXT NOT NULL DEFAULT 'durable'");
+addColumn('memories', 'expires_at', 'INTEGER');
+addColumn('memories', 'superseded_by', 'TEXT');
 
 db.exec(`
+CREATE TABLE IF NOT EXISTS memory_events (
+  id TEXT PRIMARY KEY,
+  memory_id TEXT NOT NULL,
+  bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  action TEXT NOT NULL,
+  text TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS memory_jobs (
   bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
   last_consolidated_at INTEGER NOT NULL DEFAULT 0,
@@ -39,3 +52,5 @@ CREATE TABLE IF NOT EXISTS compactions (
 `);
 
 export const configSchemaReady = true;
+addColumn('memory_jobs', 'compact_error', 'TEXT');
+addColumn('memory_jobs', 'compact_error_at', 'INTEGER');

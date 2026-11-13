@@ -13,6 +13,8 @@ model availability and access depend on your configured provider.
 - Voice and Google sign-in can be disabled independently; Composio app connections remain available.
 - Native `create_bot` tool for permanent teammates with saved instructions and project context, plus `send_to_bot` for handoff.
 - Clear Composio credential errors with retry controls in Connect Apps.
+- Read-only Codex knowledge retrieval, correctable native memories with an audit history, and expiring operational observations.
+- Native authenticated T3 MCP discovery and calls with per-Bot device grants. Connection controls live in Settings → Memories; see the [memory and T3 guide](docs/memory-and-t3.md).
 
 Start with [`.env.example`](.env.example), the [desktop guide](desktop/README.md), and the
 [deployment guide](deploy/README.md). Run `npm ci` and `npm run build` to install and build.
@@ -28,7 +30,7 @@ already used. Keep `HOST=127.0.0.1` and expose the app with private Tailscale Se
 `npm start` serves the built app. Never commit `.env`, passwords, databases, or browser profiles.
 
 Checks: `npm run typecheck`, `npm run build`, and
-`node --import tsx --test tests/permanent-bots.test.mjs tests/models.test.mjs tests/tasks.test.mjs` (uses a temporary database).
+`node --import tsx --test tests/*.test.mjs` (uses temporary databases and local mock services).
 
 The original project overview below describes its default Orgo/xAI configuration. This fork's
 local defaults are documented above and in `.env.example`; the original architecture documents

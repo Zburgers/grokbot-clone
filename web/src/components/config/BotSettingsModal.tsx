@@ -9,6 +9,7 @@ import { Icon } from '../Icon';
 import { Modal } from '../modals/Modal';
 import { Glyph } from './glyphs';
 import { ConfirmButton, Field, Segmented, Switch, nextRunLabel, shortDate } from './ui';
+import { KnowledgeConnections } from './KnowledgeConnections';
 
 const EFFORTS: { value: Bot['effort']; label: string }[] = [
   { value: 'low', label: 'Low' },
@@ -345,6 +346,16 @@ function SkillEditor({ botId, skill, onDone }: { botId: string; skill?: Skill; o
 function MemoriesTab({ bot, data, onChange }: { bot: Bot; data: BotSettingsBundle | null; onChange: () => void }) {
   const [q, setQ] = useState('');
   const [hidden, setHidden] = useState<Set<string>>(new Set());
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+  const correct = async (id: string, text: string) => {
+    setBusy(true); setMessage('');
+    try { await configApi.correctMemory(id, text); setEditing(null); onChange(); }
+    catch (e: any) { setMessage(e.message); }
+    finally { setBusy(false); }
+  };
   const memories = useMemo(() => (data?.memories ?? []).filter((m) => !hidden.has(m.id) && (!q || m.text.toLowerCase().includes(q.toLowerCase()))), [data, hidden, q]);
   const remove = async (m: Memory) => {
     setHidden((h) => new Set(h).add(m.id));
@@ -376,22 +387,41 @@ function MemoriesTab({ bot, data, onChange }: { bot: Bot; data: BotSettingsBundl
                 </div>
               </div>
               <div className="cfg-item__actions">
+                <button type="button" className="btn" onClick={() => { setEditing(m.id); setDraft(m.text); }}>Edit</button>
                 <button type="button" className="cfg-icon-btn" onClick={() => remove(m)} aria-label="Forget this" title="Forget"><Glyph name="trash" size={14} /></button>
               </div>
             </div>
           ))}
         </div>
       )}
+      {editing && <div className="cfg-field">
+        <label htmlFor="memory-correction">Correct this memory</label>
+        <textarea id="memory-correction" className="text-input" value={draft} maxLength={4000} onChange={e => setDraft(e.target.value)} />
+        <button type="button" className="btn" disabled={busy || !draft.trim()} onClick={() => correct(editing, draft)}>Save correction</button>
+        <button type="button" className="btn" onClick={() => setEditing(null)}>Cancel</button>
+      </div>}
+      {data?.memory.corrections.map(p => <div className="cfg-item" key={p.memory_id}>
+        <div><p>Suggested correction: {p.text}</p><p className="cfg-field__hint">Evidence: {p.evidence}</p><button className="btn" type="button" disabled={busy} onClick={() => correct(p.memory_id, p.text)}>Apply correction</button></div>
+      </div>)}
+      {message && <p className="cfg-field__hint" role="status">{message}</p>}
       {data && (
         <div className="cfg-meter" title="Older messages are summarized automatically when this fills up.">
-          <div className="cfg-meter__label"><span>Conversation memory</span><span>{fill}% full</span></div>
+          <div className="cfg-meter__label"><span>Until automatic summarization</span><span>{fill}%</span></div>
           <div className="cfg-meter__track"><span style={{ width: `${Math.max(2, fill)}%` }} /></div>
           <div className="cfg-field__hint">
-            When it fills up, older messages get summarized so {bot.name} can keep going.
+            Estimated progress toward the {Math.round(data.memory.compactAtChars / 4000)}k-token summarization threshold. Saved memories are separate.
             {data.memory.lastCompaction ? ` Last summarized ${shortDate(data.memory.lastCompaction.created_at)}.` : ''}
           </div>
+          {data.memory.compactionError && <p className="cfg-field__hint" role="alert">{data.memory.compactionError}</p>}
+          <button type="button" className="btn" disabled={busy} onClick={async () => {
+            setBusy(true); setMessage('');
+            try { const result = await configApi.compact(bot.id); setMessage(result.compacted ? 'Conversation summarized.' : 'History was retained; check summarization status.'); onChange(); }
+            catch (e: any) { setMessage(e.message); }
+            finally { setBusy(false); }
+          }}>{busy ? 'Working…' : 'Summarize now'}</button>
         </div>
       )}
+      {data?.knowledge && <KnowledgeConnections botId={bot.id} knowledge={data.knowledge} onChange={onChange} />}
     </div>
   );
 }

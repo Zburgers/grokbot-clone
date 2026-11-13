@@ -13,6 +13,9 @@ import { consolidateBot, historySize, maybeCompact, memoryConfig } from './agent
 import { idleConfig, viewerCount } from './idle.js';
 import { loadHistory } from './store.js';
 import type { LibraryFile, Memory, Skill } from './types.js';
+import { activeMemories } from './bot-memory.js';
+import { allowedDevice, allowedSources, setDeviceToken } from './knowledge-policy.js';
+import { callMcpTool, listMcpTools, mcpDevices } from './t3-mcp.js';
 
 /**
  * Bot settings, skills, library, computer controls and memory maintenance.
@@ -27,7 +30,7 @@ const ownBot = (userId: string, id: string) => {
   return b && b.user_id === userId ? b : null;
 };
 
-const toMemory = (m: any): Memory => ({ id: m.id, botId: m.bot_id, text: m.text, createdAt: m.created_at, source: m.source === 'learned' ? 'learned' : 'chat' });
+const toMemory = (m: any): Memory => ({ id: m.id, botId: m.bot_id, text: m.text, createdAt: m.created_at, source: m.source === 'learned' ? 'learned' : 'chat', kind: m.kind, expiresAt: m.expires_at });
 const toSkill = (s: any): Skill => ({ id: s.id, botId: s.bot_id, name: s.name, description: s.description ?? '', body: s.body, createdAt: s.created_at, updatedAt: s.updated_at ?? s.created_at });
 const listSkills = (botId: string) => (db.prepare('SELECT * FROM skills WHERE bot_id=? ORDER BY created_at ASC').all(botId) as any[]).map(toSkill);
 
@@ -36,21 +39,52 @@ const listSkills = (botId: string) => (db.prepare('SELECT * FROM skills WHERE bo
 configApi.get('/bots/:id/settings', (c) => {
   const b = ownBot(c.get('user').id, c.req.param('id'));
   if (!b) return c.json({ error: 'not found' }, 404);
-  const memories = (db.prepare('SELECT * FROM memories WHERE bot_id=? ORDER BY created_at DESC').all(b.id) as any[]).map(toMemory);
-  const job = db.prepare('SELECT last_consolidated_at, last_result FROM memory_jobs WHERE bot_id=?').get(b.id) as any;
+  const memories = activeMemories(b.id).map(toMemory);
+  const job = db.prepare('SELECT * FROM memory_jobs WHERE bot_id=?').get(b.id) as any;
+  let corrections: { memory_id: string; text: string; evidence: string }[] = [];
+  try { corrections = JSON.parse(job?.last_result ?? '{}').corrections ?? []; } catch { /* legacy result */ }
   const lastCompaction = db.prepare('SELECT method, items_before, items_after, chars_before, chars_after, created_at FROM compactions WHERE bot_id=? ORDER BY id DESC LIMIT 1').get(b.id) as any;
   return c.json({
     memories,
     skills: listSkills(b.id),
     routines: listRoutines(b.id),
     tasks: listTasks(b.id),
+    knowledge: { sources: allowedSources(b.user_id, b.id).map(s => ({ id: s.id, label: s.label })), devices: mcpDevices(b.user_id, b.id) },
     memory: {
       lastConsolidatedAt: job?.last_consolidated_at ?? null,
       historyChars: historySize(b.id, loadHistory(b.id)),
       compactAtChars: memoryConfig.compactChars,
       lastCompaction: lastCompaction ?? null,
+      compactionError: job?.compact_error ?? null,
+      corrections: corrections.filter(p => memories.some(m => m.id === p.memory_id)),
     },
   });
+});
+
+configApi.post('/bots/:id/mcp/:device/token', async (c) => {
+  const bot = ownBot(c.get('user').id, c.req.param('id'));
+  if (!bot) return c.json({ error: 'not found' }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    setDeviceToken(bot.user_id, bot.id, c.req.param('device'), body.token, body.expiresAt);
+    return c.json({ ok: true });
+  } catch { return c.json({ error: 'Invalid token, expiry, or device grant.' }, 400); }
+});
+
+configApi.post('/bots/:id/mcp/:device/test', async (c) => {
+  const bot = ownBot(c.get('user').id, c.req.param('id'));
+  if (!bot) return c.json({ error: 'not found' }, 404);
+  try { allowedDevice(bot.user_id, bot.id, c.req.param('device')); }
+  catch { return c.json({ error: 'Device access denied.' }, 403); }
+  try {
+    const device = c.req.param('device');
+    const catalog = await listMcpTools(bot.user_id, bot.id, device, 'environment');
+    const identity = catalog.tools.find(t => t.name === 't3_environment_read');
+    if (!identity) return c.json({ error: 'Authenticated tool discovery succeeded, but the expected T3 identity tool is missing.' }, 502);
+    const result = await callMcpTool(bot.user_id, bot.id, device, identity.name, {});
+    if (result.isError) return c.json({ error: 'MCP authentication succeeded, but the server identity tool returned an error.' }, 502);
+    return c.json({ ok: true, toolCount: catalog.total });
+  } catch (e: any) { return c.json({ error: e.message }, 502); }
 });
 
 // ---------- skills ----------

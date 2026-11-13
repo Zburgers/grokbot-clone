@@ -4,7 +4,8 @@ import { env } from '../env.js';
 import { newId } from '../lib/ids.js';
 import { hub } from '../lib/hub.js';
 import { getBotRow, getLive } from '../store.js';
-import { isXai, llmClient, modelFor } from '../llm.js';
+import { isXai, llmClient, modelFor, shouldFallback } from '../llm.js';
+import { activeMemories, saveMemory } from '../bot-memory.js';
 
 /**
  * Memory over time:
@@ -14,12 +15,19 @@ import { isXai, llmClient, modelFor } from '../llm.js';
  */
 
 const llm = llmClient(300_000);
+async function memoryResponse(body: any) {
+  try { return await llm.responses.create(body); }
+  catch (error) {
+    if (!shouldFallback(error)) throw error;
+    return llm.responses.create({ ...body, model: env.llmFallbackModel });
+  }
+}
 
 const num = (v: string | undefined, d: number) => (v !== undefined && v !== '' && Number.isFinite(Number(v)) ? Number(v) : d);
 
 export const memoryConfig = {
   /** Compact when the history estimate passes this many characters (~4 chars/token). GROKBOT_COMPACT_TOKENS overrides. */
-  compactChars: process.env.GROKBOT_COMPACT_TOKENS ? num(process.env.GROKBOT_COMPACT_TOKENS, 75_000) * 4 : num(process.env.GROKBOT_COMPACT_CHARS, 300_000),
+  compactChars: Math.max(1000, process.env.GROKBOT_COMPACT_TOKENS ? num(process.env.GROKBOT_COMPACT_TOKENS, 70_000) * 4 : num(process.env.GROKBOT_COMPACT_CHARS, 280_000)),
   /** User turns kept verbatim after a compaction. */
   keepTurns: num(process.env.GROKBOT_COMPACT_KEEP_TURNS, 4),
   /** Minutes without a message before consolidation runs. */
@@ -161,7 +169,7 @@ async function compactWithXai(old: any[], model: string): Promise<any[]> {
 
 async function compactWithSummary(old: any[], model: string): Promise<any[]> {
   const transcript = renderTranscript(old);
-  const res: any = await llm.responses.create({
+  const res: any = await memoryResponse({
     model,
     input: [{ role: 'system', content: SUMMARY_PROMPT }, { role: 'user', content: transcript }],
     store: false,
@@ -175,6 +183,19 @@ async function compactWithSummary(old: any[], model: string): Promise<any[]> {
 }
 
 const compactCooldown = new Map<string, number>();
+
+function recordCompactFailure(botId: string) {
+  const message = 'Automatic summarization failed. Retry summarizing in Memories, or start a new conversation; saved memories and the transcript are retained.';
+  db.prepare('INSERT INTO memory_jobs(bot_id,compact_error,compact_error_at) VALUES (?,?,?) ON CONFLICT(bot_id) DO UPDATE SET compact_error=excluded.compact_error,compact_error_at=excluded.compact_error_at').run(botId, message, now());
+  const bot = getBotRow(botId);
+  if (bot) hub.emit(bot.user_id, { type: 'memories', botId });
+}
+
+/** Conservative application guard, not a claim about the provider's maximum context. */
+export function assertContextBudget(botId: string, items: any[], overheadChars = 0) {
+  const hardChars = Math.max(memoryConfig.compactChars, num(process.env.GROKBOT_CONTEXT_MAX_TOKENS, memoryConfig.compactChars / 2) * 4);
+  if (historySize(botId, items) + overheadChars > hardChars) throw new Error('Conversation exceeded its safe context budget. Retry summarizing in Memories, or start a new conversation. Persistent memories and the transcript are retained.');
+}
 
 /**
  * Compact a bot's history if it is over budget. Must run inside the bot's serial queue
@@ -207,7 +228,7 @@ export async function maybeCompact(botId: string, items: any[], opts: { force?: 
     if (memoryConfig.compactMethod === 'summary') { method = 'summary'; replaced = await compactWithSummary(old, modelFor(bot)).catch((e) => { throw Object.assign(e, { skipXai: true }); }); }
     else replaced = await compactWithXai(old, modelFor(bot));
   } catch (e: any) {
-    if (e?.skipXai) { console.error(`[memory] summary compaction failed for ${botId}: ${e?.message ?? e}`); compactCooldown.set(botId, now() + 10 * 60_000); return items; }
+    if (e?.skipXai) { console.error(`[memory] summary compaction failed for ${botId}: ${e?.message ?? e}`); compactCooldown.set(botId, now() + 10 * 60_000); recordCompactFailure(botId); return items; }
     console.warn(`[memory] compact via /responses/compact failed for ${botId}: ${e?.message ?? e}; falling back to a summary`);
     method = 'summary';
     try {
@@ -215,11 +236,13 @@ export async function maybeCompact(botId: string, items: any[], opts: { force?: 
     } catch (e2: any) {
       console.error(`[memory] summary fallback failed for ${botId}: ${e2?.message ?? e2}`);
       compactCooldown.set(botId, now() + 10 * 60_000);
+      recordCompactFailure(botId);
       return items;
     }
   }
 
   const next = [...replaced, ...keep];
+  if (estimateChars(next) >= estimateChars(items)) { recordCompactFailure(botId); compactCooldown.set(botId, now() + 10 * 60_000); return items; }
   const ok = db.transaction(() => {
     // Guard: history must be exactly what we compacted (nothing appended meanwhile).
     const cur = db.prepare('SELECT COUNT(*) n FROM llm_items WHERE bot_id=? AND generation=?').get(botId, bot.generation) as any;
@@ -232,6 +255,9 @@ export async function maybeCompact(botId: string, items: any[], opts: { force?: 
     return true;
   })();
   if (!ok) return items;
+  db.prepare('UPDATE memory_jobs SET compact_error=NULL,compact_error_at=NULL WHERE bot_id=?').run(botId);
+  compactCooldown.delete(botId);
+  hub.emit(bot.user_id, { type: 'memories', botId });
   usage.delete(botId); // indices changed; the next model call measures the compacted history
   lastCompaction.set(botId, { generation: bot.generation, items: next.length });
   console.log(`[memory] compacted ${bot.name} (${botId}) via ${method}: ${items.length} items/${before} chars -> ${next.length} items/${estimateChars(next)} chars, kept ${keep.length} recent, ${Date.now() - t0}ms`);
@@ -262,12 +288,16 @@ Read the recent conversation and extract only durable facts worth remembering fo
 - preferences and standing instructions (tone, formats, schedules, what to always or never do)
 - lasting facts about ongoing projects
 Skip: one-off requests, small talk, temporary states, anything the Bot said about itself, passwords or secrets, and anything already covered by EXISTING MEMORIES (even if worded differently).
-Write each memory as one short standalone sentence in the third person (e.g. "Prefers bullet-point summaries."), under 200 characters. Return at most 8. Return an empty list when nothing qualifies.`;
+If a direct user statement clearly corrects an existing fact, do not add a contradictory memory. Propose a correction referencing that memory's ID, replacement text, and a short quote of the evidence. These are proposals for owner review; do not infer corrections merely from silence or Bot claims. Return at most 3 correction proposals.
+Write each new memory as one short standalone sentence in the third person (e.g. "Prefers bullet-point summaries."), under 200 characters. Return at most 8. Return empty lists when nothing qualifies.`;
 
 const SCHEMA = {
   type: 'object',
-  properties: { memories: { type: 'array', items: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } } },
-  required: ['memories'],
+  properties: {
+    memories: { type: 'array', items: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } },
+    corrections: { type: 'array', items: { type: 'object', properties: { memory_id: { type: 'string' }, text: { type: 'string' }, evidence: { type: 'string' } }, required: ['memory_id', 'text', 'evidence'], additionalProperties: false } },
+  },
+  required: ['memories', 'corrections'],
   additionalProperties: false,
 };
 
@@ -277,13 +307,19 @@ export interface ConsolidateResult { added: string[]; skipped: number; considere
 export async function consolidateBot(botId: string, opts: { upTo?: number } = {}): Promise<ConsolidateResult> {
   const bot = getBotRow(botId);
   if (!bot) return { added: [], skipped: 0, considered: 0 };
-  const job = db.prepare('SELECT last_consolidated_at FROM memory_jobs WHERE bot_id=?').get(botId) as any;
+  const job = db.prepare('SELECT last_consolidated_at,last_result FROM memory_jobs WHERE bot_id=?').get(botId) as any;
   const since = job?.last_consolidated_at ?? 0;
   const upTo = opts.upTo ?? now();
   const rows = (db.prepare("SELECT body, created_at FROM rows WHERE bot_id=? AND kind='message' AND created_at>? AND created_at<=? ORDER BY created_at DESC LIMIT 60").all(botId, since, upTo) as any[]).reverse();
-  const mark = (result: unknown, at: number) =>
+  const mark = (result: any, at: number) => {
+    let previous: any[] = [];
+    try { previous = JSON.parse(job?.last_result ?? '{}').corrections ?? []; } catch { /* legacy result */ }
+    const activeIds = new Set(activeMemories(botId).map(m => m.id));
+    const proposals = [...(result.corrections ?? []), ...previous].filter(p => activeIds.has(p.memory_id));
+    result.corrections = [...new Map(proposals.map(p => [p.memory_id, p])).values()].slice(0, 10);
     db.prepare('INSERT INTO memory_jobs(bot_id,last_consolidated_at,last_result) VALUES (?,?,?) ON CONFLICT(bot_id) DO UPDATE SET last_consolidated_at=excluded.last_consolidated_at, last_result=excluded.last_result')
       .run(botId, at, JSON.stringify(result));
+  };
   const lastAt = rows.length ? rows[rows.length - 1].created_at : upTo;
 
   const msgs = rows.map((r) => JSON.parse(r.body)).filter((b) => b?.type === 'message' && b.text && !b.streaming);
@@ -296,31 +332,36 @@ export async function consolidateBot(botId: string, opts: { upTo?: number } = {}
     .join('\n');
   if (transcript.length > 24_000) transcript = transcript.slice(-24_000);
 
-  const existing = (db.prepare('SELECT text FROM memories WHERE bot_id=? ORDER BY created_at DESC LIMIT 200').all(botId) as any[]).map((m) => m.text as string);
-  const res: any = await llm.responses.create({
+  const existingRows = activeMemories(botId, 200);
+  const existing = existingRows.map((m) => m.text as string);
+  const res: any = await memoryResponse({
     model: modelFor(bot),
     input: [
       { role: 'system', content: CONSOLIDATE_PROMPT },
-      { role: 'user', content: `EXISTING MEMORIES:\n${existing.length ? existing.map((t) => `- ${t}`).join('\n') : '(none)'}\n\nRECENT CONVERSATION:\n${transcript}` },
+      { role: 'user', content: `EXISTING MEMORIES:\n${existing.length ? existingRows.map((m) => `- [${m.id}] ${m.text}`).join('\n') : '(none)'}\n\nRECENT CONVERSATION:\n${transcript}` },
     ],
     text: { format: { type: 'json_schema', name: 'memories', schema: SCHEMA, strict: true } },
     reasoning: { effort: 'low' },
     store: false,
   } as any);
   let proposed: string[] = [];
-  try { proposed = (JSON.parse(String(res.output_text ?? '{}')).memories ?? []).map((m: any) => String(m.text ?? '').trim()).filter(Boolean); } catch { /* bad json → nothing */ }
+  let corrections: { memory_id: string; text: string; evidence: string }[] = [];
+  try {
+    const result = JSON.parse(String(res.output_text ?? '{}'));
+    proposed = (result.memories ?? []).map((m: any) => String(m.text ?? '').trim()).filter(Boolean);
+    corrections = (result.corrections ?? []).filter((m: any) => existingRows.some(e => e.id === m.memory_id) && typeof m.text === 'string' && m.text.trim() && typeof m.evidence === 'string' && m.evidence.trim()).slice(0, 3).map((m: any) => ({ memory_id: m.memory_id, text: m.text.slice(0, 1000), evidence: m.evidence.slice(0, 1000) }));
+  } catch { /* malformed proposals never rewrite saved facts */ }
 
   const added: string[] = [];
   let skipped = 0;
-  const ins = db.prepare("INSERT INTO memories(id,bot_id,text,created_at,source) VALUES (?,?,?,?,'learned')");
   for (const text of proposed.slice(0, 8)) {
     const t = text.slice(0, 300);
     if ([...existing, ...added].some((e) => similar(e, t))) { skipped++; continue; }
-    ins.run(newId('mem'), botId, t, now());
+    saveMemory(botId, t, { source: 'learned' });
     added.push(t);
   }
-  mark({ added: added.length, skipped, at: now() }, lastAt);
-  if (added.length) {
+  mark({ added: added.length, skipped, corrections, at: now() }, lastAt);
+  if (added.length || corrections.length) {
     console.log(`[memory] consolidated ${bot.name} (${botId}): +${added.length} (skipped ${skipped} duplicates)`);
     hub.emit(bot.user_id, { type: 'memories', botId });
   }
@@ -364,7 +405,7 @@ export function startMemoryConsolidation() {
 
 /** Most relevant (keyword overlap with recent user messages) and most recent memories, within a character budget. */
 export function memoriesForPrompt(botId: string, budget = memoryConfig.promptMemoryChars): { lines: string[]; omitted: number } {
-  const all = db.prepare('SELECT text, created_at FROM memories WHERE bot_id=? ORDER BY created_at DESC LIMIT 500').all(botId) as any[];
+  const all = activeMemories(botId);
   if (!all.length) return { lines: [], omitted: 0 };
   const bot = getBotRow(botId);
   const recent = (db.prepare("SELECT body FROM rows WHERE bot_id=? AND generation=? AND kind='message' ORDER BY seq DESC LIMIT 12").all(botId, bot.generation) as any[])
@@ -381,13 +422,14 @@ export function memoriesForPrompt(botId: string, budget = memoryConfig.promptMem
   });
   scored.sort((a, b) => b.score - a.score);
   const picked: typeof all = [];
+  const lineFor = (m: any) => `- [${m.id}; ${m.kind}; saved ${new Date(m.created_at).toISOString().slice(0, 10)}] ${m.text}`;
   let used = 0;
   for (const { m } of scored) {
-    const len = m.text.length + 3;
+    const len = lineFor(m).length + 1;
     if (used + len > budget) continue;
     picked.push(m);
     used += len;
   }
   picked.sort((a, b) => a.created_at - b.created_at);
-  return { lines: picked.map((m) => `- ${m.text}`), omitted: all.length - picked.length };
+  return { lines: picked.map(lineFor), omitted: all.length - picked.length };
 }

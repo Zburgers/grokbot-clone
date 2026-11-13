@@ -8,7 +8,7 @@ import { composioTools, toolkitInfo } from '../composio.js';
 import { builtinTools, llmClient, modelFor, shouldFallback } from '../llm.js';
 import { systemPrompt } from './prompt.js';
 import { repairHistory } from './history.js';
-import { maybeCompact, noteUsage } from './memory.js';
+import { maybeCompact, noteUsage, assertContextBudget } from './memory.js';
 import { activityFor, functionSchemas, humanizeSlug, policyFor, runComposioTool, toolMap, type ToolCtx, type ToolResult } from './tools.js';
 
 const llm = llmClient(360_000);
@@ -255,9 +255,10 @@ async function callModel(ctx: ToolCtx, tools: any[], signal: AbortSignal): Promi
   const bot = getBotRow(botId);
   // Runs inside the bot's serial queue, so compaction can't race a turn.
   const selectedModel = modelFor(bot);
-  const history = await maybeCompact(botId, prepareHistoryForModel(botId, selectedModel)).catch(() => loadHistory(botId));
+  const history = await maybeCompact(botId, prepareHistoryForModel(botId, selectedModel));
   // The model is only called when no approval is pending, so every orphaned call can be repaired.
   const input = [{ role: 'system', content: await systemPrompt(userId, botId) }, ...pruneImages(repairHistory(history))];
+  assertContextBudget(botId, history, JSON.stringify(input[0]).length + JSON.stringify(tools).length);
 
   const body: any = {
     model: selectedModel,

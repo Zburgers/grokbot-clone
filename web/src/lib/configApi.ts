@@ -21,7 +21,8 @@ export interface BotSettingsBundle {
   skills: Skill[];
   routines: Routine[];
   tasks: Task[];
-  memory: { lastConsolidatedAt: number | null; historyChars: number; compactAtChars: number; lastCompaction: { method: string; created_at: number } | null };
+  memory: { lastConsolidatedAt: number | null; historyChars: number; compactAtChars: number; lastCompaction: { method: string; created_at: number } | null; compactionError: string | null; corrections: { memory_id: string; text: string; evidence: string }[] };
+  knowledge: { sources: { id: string; label: string }[]; devices: { id: string; label: string; url: string; configured: boolean; expiresAt: number | null; checkedAt: number | null; connected: boolean; detail: string }[] };
 }
 
 export interface LibraryListing { status: 'ok' | 'asleep' | 'error'; path: string; files: LibraryFile[]; error?: string }
@@ -43,6 +44,10 @@ export const configApi = {
   fresh: (botId: string) => req<{ ok: true }>('POST', `/bots/${botId}/fresh`),
 
   deleteMemory: (id: string) => req<{ ok: true }>('DELETE', `/memories/${id}`),
+  correctMemory: (id: string, text: string) => req<{ memory: Memory }>('PATCH', `/memories/${id}`, { text }),
+  compact: (botId: string) => req<{ compacted: boolean }>('POST', `/bots/${botId}/compact?force=1`),
+  setMcpToken: (botId: string, device: string, token: string) => req<{ ok: true }>('POST', `/bots/${botId}/mcp/${encodeURIComponent(device)}/token`, { token }),
+  testMcp: (botId: string, device: string) => req<{ ok: true; toolCount: number }>('POST', `/bots/${botId}/mcp/${encodeURIComponent(device)}/test`),
 
   createSkill: (botId: string, s: Pick<Skill, 'name' | 'description' | 'body'>) => req<{ skill: Skill }>('POST', `/bots/${botId}/skills`, s),
   updateSkill: (id: string, s: Partial<Pick<Skill, 'name' | 'description' | 'body'>>) => req<{ skill: Skill }>('PATCH', `/skills/${id}`, s),

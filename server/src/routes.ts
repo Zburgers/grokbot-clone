@@ -18,6 +18,7 @@ import { voiceApi } from './voice.js';
 import type { Toolkit } from './types.js';
 import { availableModels } from './llm.js';
 import { createBot } from './bots.js';
+import { activeMemories, correctMemory, forgetMemory } from './bot-memory.js';
 
 export const api = new Hono<AuthVars>();
 
@@ -333,13 +334,26 @@ api.get('/tasks', (c) => {
 api.get('/bots/:id/memories', (c) => {
   const b = ownBot(c.get('user').id, c.req.param('id'));
   if (!b) return c.json({ error: 'not found' }, 404);
-  const rows = db.prepare('SELECT * FROM memories WHERE bot_id=? ORDER BY created_at DESC').all(b.id) as any[];
+  const rows = activeMemories(b.id);
   return c.json({ memories: rows.map((m) => ({ id: m.id, botId: m.bot_id, text: m.text, createdAt: m.created_at })) });
 });
 
 api.delete('/memories/:id', (c) => {
-  db.prepare('DELETE FROM memories WHERE id=? AND bot_id IN (SELECT id FROM bots WHERE user_id=?)').run(c.req.param('id'), c.get('user').id);
+  const memory = db.prepare('SELECT m.* FROM memories m JOIN bots b ON b.id=m.bot_id WHERE m.id=? AND b.user_id=?').get(c.req.param('id'), c.get('user').id) as any;
+  if (!memory) return c.json({ error: 'not found' }, 404);
+  forgetMemory(memory.bot_id, memory.id, 'Forgotten by the owner in settings');
+  hub.emit(c.get('user').id, { type: 'memories', botId: memory.bot_id });
   return c.json({ ok: true });
+});
+
+api.patch('/memories/:id', async (c) => {
+  const memory = db.prepare('SELECT m.* FROM memories m JOIN bots b ON b.id=m.bot_id WHERE m.id=? AND b.user_id=?').get(c.req.param('id'), c.get('user').id) as any;
+  if (!memory || memory.status !== 'active') return c.json({ error: 'not found' }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 4000) return c.json({ error: 'Memory text must contain 1–4000 characters.' }, 400);
+  const next = correctMemory(memory.bot_id, memory.id, body.text, 'Corrected by the owner in settings');
+  hub.emit(c.get('user').id, { type: 'memories', botId: memory.bot_id });
+  return c.json({ memory: { id: next.id, botId: next.bot_id, text: next.text, createdAt: next.created_at, source: next.source, kind: next.kind, expiresAt: next.expires_at } });
 });
 
 // ---------- computer ----------

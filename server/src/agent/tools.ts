@@ -14,6 +14,9 @@ import { createSubagent, deleteSubagent, listSubagents } from './subagents.js';
 import { createRoom, postToRoom } from './rooms.js';
 import type { ActivityKind } from '../types.js';
 import { Cron } from 'croner';
+import { saveMemory, correctMemory, forgetMemory, recallMemory } from '../bot-memory.js';
+import { searchCodexMemory, readCodexMemory } from '../codex-memory.js';
+import { callMcpTool, listMcpTools, mcpDevices, MCP_READ_TOOLS } from '../t3-mcp.js';
 
 export interface ToolCtx {
   userId: string;
@@ -68,6 +71,21 @@ function botByName(userId: string, name: string) {
 }
 
 export const TOOLS: ToolDef[] = [
+  {
+    name: 'list_mcp_devices', description: 'List your approved T3 devices and their authentication status. Use native MCP tools, not browser/curl probes of old relay URLs.',
+    parameters: obj({}), activity: 'connecting_service', label: 'Checking T3 connections',
+    impl: async (_a, ctx) => ({ output: JSON.stringify(mcpDevices(ctx.userId, ctx.botId)) }),
+  },
+  {
+    name: 'list_mcp_tools', description: 'Discover native MCP tools and argument schemas on an approved T3 device. Use query to narrow large catalogs.',
+    parameters: obj({ device: { type: 'string' }, query: { type: 'string' } }, ['device']), activity: 'connecting_service', label: 'Discovering T3 tools',
+    impl: async (a, ctx) => ({ output: JSON.stringify(await listMcpTools(ctx.userId, ctx.botId, a.device, a.query)) }),
+  },
+  {
+    name: 'mcp_call', description: 'Invoke an advertised T3 tool on an approved device using its exact schema. Omit environmentId: device selection provides scope. Writes may require owner approval; access is checked again after approval.',
+    parameters: obj({ device: { type: 'string' }, tool: { type: 'string' }, arguments: { type: 'object', additionalProperties: true } }, ['device', 'tool', 'arguments']), activity: 'connecting_service', label: 'Using T3',
+    impl: async (a, ctx) => ({ output: JSON.stringify(await callMcpTool(ctx.userId, ctx.botId, a.device, a.tool, a.arguments)) }),
+  },
   {
     name: 'computer_screenshot',
     description: "Take a screenshot of your own computer screen (a Linux desktop that only you use). Use this before acting on the screen.",
@@ -190,13 +208,14 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'remember',
-    description: 'Save a durable memory about the user, their preferences, or your job, so you remember it in future conversations.',
-    parameters: obj({ text: { type: 'string' } }, ['text']),
+    description: 'Save a durable memory about the user, their preferences, or your job. Use observation for temporary operational state. Never save credentials or secrets. Use correct_memory to replace an outdated fact instead of adding a contradiction.',
+    parameters: obj({ text: { type: 'string' }, kind: { type: 'string', enum: ['durable', 'observation'], description: 'Use observation for volatile operational state; it expires after seven days.' } }, ['text']),
     activity: 'remembering',
     label: 'Saving notes',
     impl: async (a, ctx) => {
-      db.prepare('INSERT INTO memories(id,bot_id,text,created_at) VALUES (?,?,?,?)').run(newId('mem'), ctx.botId, String(a.text), now());
-      return { output: 'Saved to memory.', summary: 'Saved a memory' };
+      const memory = saveMemory(ctx.botId, a.text, { kind: a.kind });
+      hub.emit(ctx.userId, { type: 'memories', botId: ctx.botId });
+      return { output: JSON.stringify({ id: memory.id, text: memory.text, kind: memory.kind, expiresAt: memory.expires_at }), summary: 'Saved a memory' };
     },
   },
   {
@@ -206,11 +225,44 @@ export const TOOLS: ToolDef[] = [
     activity: 'remembering',
     label: 'Searching memory',
     impl: async (a, ctx) => {
-      const words = String(a.query).toLowerCase().split(/\W+/).filter((w) => w.length > 2);
-      const all = db.prepare('SELECT text, created_at FROM memories WHERE bot_id=? ORDER BY created_at DESC').all(ctx.botId) as any[];
-      const hits = all.filter((m) => !words.length || words.some((w) => m.text.toLowerCase().includes(w))).slice(0, 20);
-      return { output: JSON.stringify(hits.map((h) => h.text)) };
+      return { output: JSON.stringify(recallMemory(ctx.botId, a.query)) };
     },
+  },
+  {
+    name: 'correct_memory',
+    description: 'Replace one of your outdated memories by ID. The previous version stays in the audit history and stops appearing in recall and prompts. Use evidence and current user instructions.',
+    parameters: obj({ memory_id: { type: 'string' }, text: { type: 'string' }, reason: { type: 'string' } }, ['memory_id', 'text', 'reason']),
+    activity: 'remembering', label: 'Correcting a memory',
+    impl: async (a, ctx) => {
+      const memory = correctMemory(ctx.botId, a.memory_id, a.text, String(a.reason));
+      hub.emit(ctx.userId, { type: 'memories', botId: ctx.botId });
+      return { output: JSON.stringify(memory), summary: 'Corrected a memory' };
+    },
+  },
+  {
+    name: 'forget_memory',
+    description: 'Remove one of your memories from active use by ID when the user asks to forget it or it is demonstrably obsolete. An audit copy is retained.',
+    parameters: obj({ memory_id: { type: 'string' }, reason: { type: 'string' } }, ['memory_id', 'reason']),
+    activity: 'remembering', label: 'Forgetting a memory',
+    impl: async (a, ctx) => {
+      const forgotten = forgetMemory(ctx.botId, a.memory_id, String(a.reason));
+      hub.emit(ctx.userId, { type: 'memories', botId: ctx.botId });
+      return { output: JSON.stringify({ forgotten }), summary: forgotten ? 'Forgot a memory' : 'Memory not found' };
+    },
+  },
+  {
+    name: 'search_codex_memory',
+    description: 'Search approved Codex persistent knowledge for relevant historical context. Results cite source files and dates. Verify current state before relying on old operational facts.',
+    parameters: obj({ query: { type: 'string' } }, ['query']),
+    activity: 'remembering', label: 'Searching Codex knowledge',
+    impl: async (a, ctx) => ({ output: JSON.stringify(await searchCodexMemory(ctx.userId, ctx.botId, a.query)) }),
+  },
+  {
+    name: 'read_codex_memory',
+    description: 'Read a bounded excerpt from an approved Codex memory source returned by search. These files are read-only historical evidence.',
+    parameters: obj({ source: { type: 'string' }, path: { type: 'string' }, start_line: { type: 'integer' }, line_count: { type: 'integer' } }, ['source', 'path']),
+    activity: 'remembering', label: 'Reading Codex knowledge',
+    impl: async (a, ctx) => ({ output: JSON.stringify(await readCodexMemory(ctx.userId, ctx.botId, a.source, a.path, a.start_line, a.line_count)) }),
   },
   {
     name: 'create_routine',
@@ -512,6 +564,12 @@ export function functionSchemas() {
 export type Decision = 'allow' | 'ask' | 'block';
 
 export function policyFor(userId: string, toolName: string, args: any): { decision: Decision; key: string; toolkit?: string; title: string } {
+  if (toolName === 'mcp_call') {
+    const key = `mcp:${String(args.device)}:${String(args.tool)}`;
+    const saved = db.prepare('SELECT mode FROM policies WHERE user_id=? AND tool=?').get(userId, key) as any;
+    const decision: Decision = saved?.mode === 'blocked' ? 'block' : saved?.mode === 'always_allow' || MCP_READ_TOOLS.has(args.tool) ? 'allow' : 'ask';
+    return { decision, key, title: `T3: run ${String(args.tool)} on ${String(args.device)}` };
+  }
   if (toolMap.has(toolName)) return { decision: 'allow', key: toolName, title: toolName };
   const slugs = innerToolSlugs(toolName, args);
   if (!slugs.length) return { decision: 'allow', key: toolName, title: toolName };
