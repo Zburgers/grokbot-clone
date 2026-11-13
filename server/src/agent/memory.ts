@@ -4,7 +4,7 @@ import { env } from '../env.js';
 import { newId } from '../lib/ids.js';
 import { hub } from '../lib/hub.js';
 import { getBotRow, getLive } from '../store.js';
-import { isXai, llmClient } from '../llm.js';
+import { isXai, llmClient, modelFor } from '../llm.js';
 
 /**
  * Memory over time:
@@ -152,17 +152,17 @@ export function renderTranscript(items: any[], maxChars = 200_000): string {
   return out;
 }
 
-async function compactWithXai(old: any[]): Promise<any[]> {
-  const res: any = await llm.post('/responses/compact', { body: { model: env.llmModel, input: old } });
+async function compactWithXai(old: any[], model: string): Promise<any[]> {
+  const res: any = await llm.post('/responses/compact', { body: { model, input: old } });
   const out = (res?.output ?? []) as any[];
   if (!out.length || !out.some((o) => o?.type === 'compaction' || o?.encrypted_content || o?.role)) throw new Error('compact returned no items');
   return out;
 }
 
-async function compactWithSummary(old: any[]): Promise<any[]> {
+async function compactWithSummary(old: any[], model: string): Promise<any[]> {
   const transcript = renderTranscript(old);
   const res: any = await llm.responses.create({
-    model: env.llmModel,
+    model,
     input: [{ role: 'system', content: SUMMARY_PROMPT }, { role: 'user', content: transcript }],
     store: false,
     reasoning: { effort: 'low' },
@@ -204,14 +204,14 @@ export async function maybeCompact(botId: string, items: any[], opts: { force?: 
   let method = 'xai-compact';
   let replaced: any[];
   try {
-    if (memoryConfig.compactMethod === 'summary') { method = 'summary'; replaced = await compactWithSummary(old).catch((e) => { throw Object.assign(e, { skipXai: true }); }); }
-    else replaced = await compactWithXai(old);
+    if (memoryConfig.compactMethod === 'summary') { method = 'summary'; replaced = await compactWithSummary(old, modelFor(bot)).catch((e) => { throw Object.assign(e, { skipXai: true }); }); }
+    else replaced = await compactWithXai(old, modelFor(bot));
   } catch (e: any) {
     if (e?.skipXai) { console.error(`[memory] summary compaction failed for ${botId}: ${e?.message ?? e}`); compactCooldown.set(botId, now() + 10 * 60_000); return items; }
     console.warn(`[memory] compact via /responses/compact failed for ${botId}: ${e?.message ?? e}; falling back to a summary`);
     method = 'summary';
     try {
-      replaced = await compactWithSummary(old);
+      replaced = await compactWithSummary(old, modelFor(bot));
     } catch (e2: any) {
       console.error(`[memory] summary fallback failed for ${botId}: ${e2?.message ?? e2}`);
       compactCooldown.set(botId, now() + 10 * 60_000);
@@ -298,7 +298,7 @@ export async function consolidateBot(botId: string, opts: { upTo?: number } = {}
 
   const existing = (db.prepare('SELECT text FROM memories WHERE bot_id=? ORDER BY created_at DESC LIMIT 200').all(botId) as any[]).map((m) => m.text as string);
   const res: any = await llm.responses.create({
-    model: env.llmModel,
+    model: modelFor(bot),
     input: [
       { role: 'system', content: CONSOLIDATE_PROMPT },
       { role: 'user', content: `EXISTING MEMORIES:\n${existing.length ? existing.map((t) => `- ${t}`).join('\n') : '(none)'}\n\nRECENT CONVERSATION:\n${transcript}` },

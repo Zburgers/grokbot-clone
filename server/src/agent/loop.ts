@@ -2,10 +2,10 @@ import { db, now } from '../db.js';
 import { env } from '../env.js';
 import { newId, sha256 } from '../lib/ids.js';
 import { hub } from '../lib/hub.js';
-import { appendHistory, appendRow, emitBot, getBotRow, getRow, loadHistory, setLive, updateRow } from '../store.js';
+import { appendHistory, appendRow, emitBot, getBotRow, getRow, loadHistory, prepareHistoryForModel, setLive, updateRow } from '../store.js';
 import type { MessageBody, ToolCallBody } from '../types.js';
 import { composioTools, toolkitInfo } from '../composio.js';
-import { builtinTools, llmClient, shouldFallback } from '../llm.js';
+import { builtinTools, llmClient, modelFor, shouldFallback } from '../llm.js';
 import { systemPrompt } from './prompt.js';
 import { repairHistory } from './history.js';
 import { maybeCompact, noteUsage } from './memory.js';
@@ -254,12 +254,13 @@ async function callModel(ctx: ToolCtx, tools: any[], signal: AbortSignal): Promi
   const { botId, userId } = ctx;
   const bot = getBotRow(botId);
   // Runs inside the bot's serial queue, so compaction can't race a turn.
-  const history = await maybeCompact(botId, loadHistory(botId)).catch(() => loadHistory(botId));
+  const selectedModel = modelFor(bot);
+  const history = await maybeCompact(botId, prepareHistoryForModel(botId, selectedModel)).catch(() => loadHistory(botId));
   // The model is only called when no approval is pending, so every orphaned call can be repaired.
   const input = [{ role: 'system', content: await systemPrompt(userId, botId) }, ...pruneImages(repairHistory(history))];
 
   const body: any = {
-    model: env.llmModel,
+    model: selectedModel,
     input,
     tools,
     reasoning: { effort: bot.effort ?? 'medium' },
@@ -333,6 +334,7 @@ async function callModel(ctx: ToolCtx, tools: any[], signal: AbortSignal): Promi
   if (msgSeq !== null) flush(false);
   if (!final) throw new Error('model stream ended without a response');
   if (final.usage?.input_tokens) noteUsage(botId, final.usage.input_tokens, history.length);
+  prepareHistoryForModel(botId, body.model);
   return { output: final.output ?? [] };
 }
 

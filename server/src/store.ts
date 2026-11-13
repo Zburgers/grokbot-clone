@@ -1,6 +1,7 @@
 import { db, now } from './db.js';
 import { hub } from './lib/hub.js';
 import type { Bot, LiveState, Row, RowBody, RowKind, Routine, Task } from './types.js';
+import { env } from './env.js';
 import { Cron } from 'croner';
 
 // ---------- bots ----------
@@ -27,6 +28,7 @@ export function toBot(r: any): Bot {
     isPrimary: !!r.is_primary,
     kind: r.kind === 'room' ? 'room' : 'agent',
     pinned: !!r.pinned,
+    model: r.model ?? '',
     effort: r.effort,
     voice: r.voice ?? 'luna',
     voiceSpeed: r.voice_speed ?? 1,
@@ -126,6 +128,20 @@ export function clearConversation(botId: string) {
 export function loadHistory(botId: string): any[] {
   const b = getBotRow(botId);
   return (db.prepare('SELECT item FROM llm_items WHERE bot_id=? AND generation=? ORDER BY idx ASC').all(botId, b.generation) as any[]).map((r) => JSON.parse(r.item));
+}
+
+/** Remove model-specific opaque state when changing providers; keep readable history and tools. */
+export function prepareHistoryForModel(botId: string, model: string): any[] {
+  const bot = getBotRow(botId);
+  const items = loadHistory(botId);
+  if ((bot.history_model || env.llmModel) === model) return items;
+  const portable = items.filter((it) => it?.type !== 'reasoning' && it?.type !== 'compaction');
+  db.transaction(() => {
+    db.prepare('DELETE FROM llm_items WHERE bot_id=? AND generation=?').run(botId, bot.generation);
+    db.prepare('UPDATE bots SET history_model=? WHERE id=?').run(model, botId);
+    appendHistory(botId, portable);
+  })();
+  return portable;
 }
 
 export function appendHistory(botId: string, items: any[]) {

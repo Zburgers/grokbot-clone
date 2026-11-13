@@ -8,7 +8,7 @@ model availability and access depend on your configured provider.
 ## Changes in this fork
 
 - Local Docker desktops, browser profiles, file downloads, and a live VNC viewer; no Orgo account required in local mode.
-- Configurable model endpoint, model name, hosted tools, and optional fallback model.
+- Configurable model endpoint, model name, hosted tools, and optional fallback model. Each Bot can choose a model in Settings → General → Model, or follow the server default. Available choices come from your endpoint; temporary helpers inherit their parent’s choice.
 - Single-owner password login, localhost binding, and private Tailscale deployment guidance.
 - Voice and Google sign-in can be disabled independently; Composio app connections remain available.
 - Native `create_bot` tool for permanent teammates with saved instructions and project context, plus `send_to_bot` for handoff.
@@ -28,7 +28,7 @@ already used. Keep `HOST=127.0.0.1` and expose the app with private Tailscale Se
 `npm start` serves the built app. Never commit `.env`, passwords, databases, or browser profiles.
 
 Checks: `npm run typecheck`, `npm run build`, and
-`node --import tsx --test tests/permanent-bots.test.mjs` (uses a temporary database).
+`node --import tsx --test tests/permanent-bots.test.mjs tests/models.test.mjs` (uses a temporary database).
 
 The original project overview below describes its default Orgo/xAI configuration. This fork's
 local defaults are documented above and in `.env.example`; the original architecture documents

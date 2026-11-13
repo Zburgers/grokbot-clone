@@ -86,11 +86,24 @@ export function BotSettingsModal() {
 
 // ---------------------------------------------------------------------------
 
-type Draft = Pick<Bot, 'name' | 'label' | 'description' | 'instructions' | 'avatarShape' | 'avatarColor' | 'effort' | 'mode'>;
-const draftOf = (b: Bot): Draft => ({ name: b.name, label: b.label, description: b.description, instructions: b.instructions, avatarShape: b.avatarShape, avatarColor: b.avatarColor, effort: b.effort, mode: b.mode });
+type Draft = Pick<Bot, 'name' | 'label' | 'description' | 'instructions' | 'avatarShape' | 'avatarColor' | 'effort' | 'mode' | 'model'>;
+const draftOf = (b: Bot): Draft => ({ name: b.name, label: b.label, description: b.description, instructions: b.instructions, avatarShape: b.avatarShape, avatarColor: b.avatarColor, effort: b.effort, mode: b.mode, model: b.model || '' });
 
 function GeneralTab({ bot, onClose }: { bot: Bot; onClose: () => void }) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(bot));
+  const [models, setModels] = useState<{ models: string[]; defaultModel: string } | null>(null);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(true);
+  const [modelsRetry, setModelsRetry] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    setModelsLoading(true); setModelsError(null);
+    configApi.models()
+      .then((data) => { if (alive) setModels(data); })
+      .catch((e) => { if (alive) setModelsError((e as Error).message); })
+      .finally(() => { if (alive) setModelsLoading(false); });
+    return () => { alive = false; };
+  }, [modelsRetry]);
   const [picker, setPicker] = useState(false);
   const [saving, setSaving] = useState(false);
   const [note, setNote] = useState<{ text: string; tone: 'ok' | 'error' } | null>(null);
@@ -149,6 +162,15 @@ function GeneralTab({ bot, onClose }: { bot: Bot; onClose: () => void }) {
         </Field>
         <Field label="Instructions" htmlFor="cfg-instructions" hint={`Standing guidance ${draft.name || 'this Bot'} always follows, like tone, priorities or things to avoid. It also learns from chat, skills and memories.`}>
           <textarea id="cfg-instructions" className="text-input cfg-textarea cfg-textarea--tall" rows={7} value={draft.instructions} maxLength={8000} placeholder="e.g. Keep updates to three bullets. Never email anyone outside the team without asking." onChange={(e) => put('instructions', e.target.value)} />
+        </Field>
+        <Field label="Model" htmlFor="cfg-model" hint="Used for this Bot’s future turns and memory work. Chat and memories stay when you switch. Models vary in support for tools, images, and thinking effort.">
+          <select id="cfg-model" className="text-input" value={draft.model} onChange={(e) => put('model', e.target.value)} disabled={modelsLoading}>
+            <option value="">Server default{models ? ` (${models.defaultModel})` : ''}</option>
+            {draft.model && !models?.models.includes(draft.model) && <option value={draft.model}>{draft.model} (saved selection)</option>}
+            {models?.models.map((id) => <option key={id} value={id}>{id}</option>)}
+          </select>
+          {modelsLoading && <span role="status">Loading models…</span>}
+          {modelsError && <div role="alert">{modelsError} <button type="button" className="cfg-btn cfg-btn--secondary" onClick={() => setModelsRetry((n) => n + 1)}>Try again</button></div>}
         </Field>
         <Field label="Thinking effort" hint={EFFORT_HINT[draft.effort]}>
           <Segmented label="Thinking effort" value={draft.effort} options={EFFORTS} onChange={(v) => put('effort', v)} />

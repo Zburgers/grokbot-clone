@@ -6,7 +6,7 @@ import { env } from './env.js';
 import { newId } from './lib/ids.js';
 import { hub } from './lib/hub.js';
 import { createSession, destroySession, requireUser, userFromCookieHeader, type AuthVars } from './lib/auth.js';
-import { allLive, appendRow, clearConversation, emitBot, getBot, getBotRow, getRow, listBots, listRoutines, listRows, listTasks, toRoutine, updateRow } from './store.js';
+import { allLive, appendRow, clearConversation, emitBot, getBot, getBotRow, getLive, getRow, listBots, listRoutines, listRows, listTasks, toRoutine, updateRow } from './store.js';
 import { enqueue, interrupt, resolveApproval } from './agent/loop.js';
 import { computerState, ensureComputer, refreshComputer, suspendComputer } from './computer.js';
 import { box as orgo } from './box.js';
@@ -16,6 +16,7 @@ import { deleteEventTrigger } from './triggers.js';
 import { dispatchRoomMessage } from './agent/rooms.js';
 import { voiceApi } from './voice.js';
 import type { Toolkit } from './types.js';
+import { availableModels } from './llm.js';
 import { createBot } from './bots.js';
 
 export const api = new Hono<AuthVars>();
@@ -139,6 +140,14 @@ const ownBot = (userId: string, id: string) => {
   return b && b.user_id === userId ? b : null;
 };
 
+api.get('/models', async (c) => {
+  try {
+    return c.json({ models: await availableModels(), defaultModel: env.llmModel });
+  } catch {
+    return c.json({ error: 'Could not load models from the configured model endpoint. Please try again.' }, 502);
+  }
+});
+
 api.get('/bots', (c) => c.json({ bots: listBots(c.get('user').id), live: allLive(c.get('user').id) }));
 
 api.post('/bots', async (c) => {
@@ -150,7 +159,22 @@ api.patch('/bots/:id', async (c) => {
   const b = ownBot(c.get('user').id, c.req.param('id'));
   if (!b) return c.json({ error: 'not found' }, 404);
   const p = await c.req.json();
-  const cols: Record<string, string> = { name: 'name', label: 'label', description: 'description', instructions: 'instructions', avatarShape: 'avatar_shape', avatarColor: 'avatar_color', mode: 'mode', effort: 'effort', pinned: 'pinned', voice: 'voice', voiceSpeed: 'voice_speed', voiceLanguage: 'voice_language' };
+  if (p.model !== undefined) {
+    if (typeof p.model !== 'string' || p.model.length > 200) return c.json({ error: 'Choose a valid model.' }, 400);
+    p.model = p.model.trim();
+    if (p.model !== (b.model || '')) {
+      if (getLive(b.id).isRunning) return c.json({ error: 'Wait for this Bot to finish or stop its current task before changing models.' }, 409);
+      if (p.model) {
+        try {
+          if (!(await availableModels()).includes(p.model)) return c.json({ error: 'That model is not available from the configured endpoint.' }, 400);
+        } catch {
+          return c.json({ error: 'Could not verify the model. Please try again.' }, 502);
+        }
+      }
+    }
+    if (p.model !== (b.model || '') && getLive(b.id).isRunning) return c.json({ error: 'Wait for this Bot to finish or stop its current task before changing models.' }, 409);
+  }
+  const cols: Record<string, string> = { name: 'name', label: 'label', description: 'description', instructions: 'instructions', avatarShape: 'avatar_shape', avatarColor: 'avatar_color', mode: 'mode', effort: 'effort', model: 'model', pinned: 'pinned', voice: 'voice', voiceSpeed: 'voice_speed', voiceLanguage: 'voice_language' };
   for (const [k, col] of Object.entries(cols)) {
     if (p[k] !== undefined) db.prepare(`UPDATE bots SET ${col}=?, updated_at=? WHERE id=?`).run(typeof p[k] === 'boolean' ? (p[k] ? 1 : 0) : p[k], now(), b.id);
   }
