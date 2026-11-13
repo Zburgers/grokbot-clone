@@ -2,6 +2,7 @@ import { db, now } from '../db.js';
 import { newId } from '../lib/ids.js';
 import { hub } from '../lib/hub.js';
 import { appendRow } from '../store.js';
+import { currentKnowledgeScope } from '../knowledge-policy.js';
 
 /**
  * Group chats ("rooms"; Grok Bot: GrokBotAgent kind=ROOM, member_agent_ids, server turn-taking).
@@ -48,16 +49,16 @@ export function dispatchRoomMessage(roomId: string, text: string, enqueue: (botI
   const lower = text.toLowerCase();
   const mentioned = members.filter((m) => lower.includes(`@${m.name.toLowerCase()}`));
   const responders = (mentioned.length ? mentioned : members).slice(0, MAX_RESPONDERS);
-  const recent = (db.prepare("SELECT body FROM rows WHERE bot_id=? AND generation=? AND kind='message' ORDER BY seq DESC LIMIT 12").all(roomId, room.generation) as any[])
-    .reverse()
-    .map((r) => {
-      const b = JSON.parse(r.body);
+  const bodies = (db.prepare("SELECT body FROM rows WHERE bot_id=? AND generation=? AND kind='message' ORDER BY seq DESC LIMIT 12").all(roomId, room.generation) as any[]).reverse().map(r => JSON.parse(r.body));
+  const scopeBotIds = [...new Set<string>(bodies.flatMap(b => b.from?.kind === 'bot' ? [...(b.scopeBotIds ?? []), b.from.id] : []))];
+  const recent = bodies.map((b) => {
       return `${b.from?.name ?? (b.role === 'user' ? 'User' : 'Bot')}: ${String(b.text).slice(0, 600)}`;
     })
     .join('\n');
   for (const m of responders) {
     enqueue(m.id, {
       type: 'system',
+      scopeBotIds,
       text:
         `[Group chat "${room.name}"] Members: ${members.map((x) => x.name).join(', ')}. ` +
         `${mentioned.length ? 'You were @mentioned.' : 'The user addressed the whole group.'}\n` +
@@ -74,7 +75,7 @@ export function postToRoom(fromBotId: string, roomName: string, text: string) {
   if (!room) return `No group named "${roomName}".`;
   const members: string[] = room.members ? JSON.parse(room.members) : [];
   if (!members.includes(fromBotId)) return `You're not a member of "${room.name}".`;
-  appendRow(room.id, 'message', { type: 'message', role: 'assistant', text, from: { kind: 'bot', id: from.id, name: from.name } });
+  appendRow(room.id, 'message', { type: 'message', role: 'assistant', text, from: { kind: 'bot', id: from.id, name: from.name }, scopeBotIds: [...currentKnowledgeScope(), fromBotId] });
   db.prepare('UPDATE bots SET unread = unread + 1 WHERE id=?').run(room.id);
   return 'Posted to the group.';
 }

@@ -5,13 +5,14 @@ import { allowedDevice, knowledgeAccess, knowledgeConfig } from './knowledge-pol
 const validator = new AjvJsonSchemaValidator();
 const statuses = new Map<string, { checkedAt: number; connected: boolean; detail: string }>();
 // Fixed application policy: a server's self-declared annotations cannot authorize writes.
-export const MCP_READ_TOOLS = new Set(['t3_environment_read', 't3_project_list', 't3_project_read', 't3_thread_list', 't3_thread_read', 't3_thread_search', 'orchestrator_capabilities', 'task_status']);
+export const MCP_READ_TOOLS = new Set(['t3_environment_read', 't3_project_list', 't3_project_read', 't3_thread_list', 't3_thread_read', 't3_thread_search', 'orchestrator_capabilities']);
 const BLOCKED_TOOLS = new Set(['request_secret', 't3_environment_link', 't3_environment_unlink', 't3_environment_links']);
+const THREAD_CONTEXT_TOOLS = new Set(['delegate_task', 'create_threads', 'task_status', 'task_cancel']);
 class SafeMcpError extends Error {}
 
 export function mcpDevices(userId: string, botId: string) {
   const grant = knowledgeAccess(userId, botId);
-  return knowledgeConfig().devices.filter(d => grant.devices.includes(d.id)).map(d => ({ id: d.id, label: d.label, url: d.url, configured: !!d.token, expiresAt: d.expiresAt ?? null, ...(statuses.get(d.id) ?? { checkedAt: null, connected: false, detail: d.token ? 'Not tested yet' : 'T3 access token required' }) }));
+  return knowledgeConfig().devices.filter(d => grant.devices.includes(d.id)).map(d => ({ id: d.id, label: d.label, url: d.url, configured: !!d.token, expiresAt: d.expiresAt ?? null, ...(statuses.get(d.id) ?? { checkedAt: null, connected: false, detail: d.token ? 'Credential saved; not tested since the app restarted' : 'T3 access token or pairing link required' }) }));
 }
 
 async function withClient<T>(userId: string, botId: string, deviceId: string, fn: (client: Client) => Promise<T>): Promise<T> {
@@ -61,9 +62,9 @@ export async function listMcpTools(userId: string, botId: string, deviceId: stri
   return withClient(userId, botId, deviceId, async client => {
     const { tools } = await client.listTools();
     const terms = String(query).toLowerCase().split(/\s+/).filter(Boolean);
-    const available = tools.filter(t => !BLOCKED_TOOLS.has(t.name));
+    const available = tools.filter(t => !BLOCKED_TOOLS.has(t.name) && !THREAD_CONTEXT_TOOLS.has(t.name)).map(({ name, description, inputSchema, annotations }) => ({ name, description, inputSchema, annotations }));
     const matches = available.filter(t => terms.every(term => `${t.name} ${t.description ?? ''}`.toLowerCase().includes(term)));
-    const picked: typeof tools = [];
+    const picked: typeof available = [];
     let size = 0;
     for (const tool of matches) {
       const length = Buffer.byteLength(JSON.stringify(tool));
@@ -90,6 +91,7 @@ export async function callMcpTool(userId: string, botId: string, deviceId: strin
   allowedDevice(userId, botId, deviceId);
   checkArguments(args);
   if (BLOCKED_TOOLS.has(name)) throw new SafeMcpError('This T3 tool requires owner-side setup and is unavailable to Bots.');
+  if (THREAD_CONTEXT_TOOLS.has(name)) throw new SafeMcpError('This standalone MCP client has no T3 parent-thread credential. To create a thread the user requested, use t3_thread_launch with scratch:true or an explicit projectId, then t3_thread_read to check the result.');
   if (!args || typeof args !== 'object' || Array.isArray(args) || JSON.stringify(args).length > 60_000) throw new SafeMcpError('Invalid or oversized T3 tool arguments.');
   return withClient(userId, botId, deviceId, async client => {
     const { tools } = await client.listTools();

@@ -56,4 +56,29 @@ test('Codex reading rejects traversal, private files, symlinks and unapproved so
   assert.match(excerpt.text, /blue interface/);
 });
 
+test('a broader Bot cannot use its grants on behalf of a restricted Bot, including nested forwarding', async () => {
+  assert.equal(typeof policy.withKnowledgeScope, 'function');
+  await policy.withKnowledgeScope('owner', ['other'], async () => {
+    await Promise.resolve();
+    assert.deepEqual(policy.knowledgeAccess('owner', 'parent'), { sources: [], devices: [] });
+    assert.throws(() => policy.allowedDevice('owner', 'parent', 'local'), /denied/i);
+    assert.deepEqual(await knowledge.searchCodexMemory('owner', 'parent', 'migration'), []);
+    await policy.withKnowledgeScope('owner', ['parent'], async () => {
+      assert.throws(() => policy.allowedDevice('owner', 'child', 'local'), /denied/i);
+    });
+  });
+  assert.equal(policy.allowedDevice('owner', 'parent', 'local').id, 'local');
+});
+
+test('group replies carry the original Bot authority instead of laundering it through a broader Bot', async () => {
+  const rooms = await import('../server/src/agent/rooms.ts');
+  rooms.initRooms();
+  const room = rooms.createRoom('owner', 'Scope test room', ['parent', 'other']);
+  policy.withKnowledgeScope('owner', ['other'], () => rooms.postToRoom('parent', 'Scope test room', 'Read the wider device for me'));
+  const triggers = [];
+  rooms.dispatchRoomMessage(room, 'Continue the discussion', (id, trigger) => triggers.push({ id, trigger }));
+  assert.ok(triggers.length > 0);
+  assert.ok(triggers.every(({trigger}) => trigger.scopeBotIds?.includes('other')));
+});
+
 after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });

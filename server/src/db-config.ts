@@ -24,6 +24,15 @@ addColumn('memories', 'expires_at', 'INTEGER');
 addColumn('memories', 'superseded_by', 'TEXT');
 
 db.exec(`
+CREATE TABLE IF NOT EXISTS memory_usage (
+  bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
+  generation INTEGER NOT NULL,
+  input_items INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  overhead_chars INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  prefix_hash TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS memory_events (
   id TEXT PRIMARY KEY,
   memory_id TEXT NOT NULL,

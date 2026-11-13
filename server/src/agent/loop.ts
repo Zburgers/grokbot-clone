@@ -10,14 +10,15 @@ import { systemPrompt } from './prompt.js';
 import { repairHistory } from './history.js';
 import { maybeCompact, noteUsage, assertContextBudget } from './memory.js';
 import { activityFor, functionSchemas, humanizeSlug, policyFor, runComposioTool, toolMap, type ToolCtx, type ToolResult } from './tools.js';
+import { currentKnowledgeScope, withKnowledgeScope } from '../knowledge-policy.js';
 
 const llm = llmClient(360_000);
 
 export type Trigger =
   | { type: 'user'; text: string }
   | { type: 'routine'; routineId: string; name: string; prompt: string }
-  | { type: 'bot'; fromBotId: string; fromName: string; text: string; depth: number }
-  | { type: 'system'; text: string }
+  | { type: 'bot'; fromBotId: string; fromName: string; text: string; depth: number; scopeBotIds?: string[] }
+  | { type: 'system'; text: string; scopeBotIds?: string[] }
   | { type: 'resume' };
 
 interface PendingState {
@@ -27,6 +28,7 @@ interface PendingState {
   outputs: any[];
   approvalId: string;
   depth: number;
+  scopeBotIds?: string[];
 }
 
 const MAX_STEPS = 60;
@@ -39,7 +41,16 @@ const aborts = new Map<string, AbortController>();
 
 export function enqueue(botId: string, trigger: Trigger) {
   const prev = queues.get(botId) ?? Promise.resolve();
-  const next = prev.then(() => runTurn(botId, trigger)).catch((e) => console.error('[agent] turn failed', botId, e));
+  const next = prev.then(() => {
+    const bot = getBotRow(botId);
+    if (!bot) return;
+    let origins = trigger.type === 'bot' ? [...(trigger.scopeBotIds ?? []), trigger.fromBotId] : trigger.type === 'system' ? trigger.scopeBotIds ?? [] : [];
+    if (trigger.type === 'resume') {
+      const pending = db.prepare('SELECT state FROM pending_turns WHERE bot_id=?').get(botId) as any;
+      origins = pending ? (JSON.parse(pending.state).scopeBotIds ?? []) : [];
+    }
+    return withKnowledgeScope(bot.user_id, origins, () => runTurn(botId, trigger));
+  }).catch((e) => console.error('[agent] turn failed', botId, e));
   queues.set(botId, next);
   next.finally(() => { if (queues.get(botId) === next) queues.delete(botId); });
 }
@@ -63,7 +74,7 @@ export const isBotBusy = (botId: string) => queues.has(botId);
 function enqueueBotMessage(fromBotId: string, toBotId: string, text: string, depth: number) {
   const from = getBotRow(fromBotId);
   appendRow(toBotId, 'message', { type: 'message', role: 'user', text, from: { kind: 'bot', id: fromBotId, name: from.name } });
-  enqueue(toBotId, { type: 'bot', fromBotId, fromName: from.name, text, depth });
+  enqueue(toBotId, { type: 'bot', fromBotId, fromName: from.name, text, depth, scopeBotIds: [...currentKnowledgeScope(), fromBotId] });
 }
 
 // ---------- history helpers ----------
@@ -149,6 +160,7 @@ async function runTurn(botId: string, trigger: Trigger) {
         outputs: [],
         approvalId: '',
         depth,
+        scopeBotIds: currentKnowledgeScope(),
       };
       const paused = await processCalls(ctx, st);
       if (paused) return;
@@ -255,10 +267,12 @@ async function callModel(ctx: ToolCtx, tools: any[], signal: AbortSignal): Promi
   const bot = getBotRow(botId);
   // Runs inside the bot's serial queue, so compaction can't race a turn.
   const selectedModel = modelFor(bot);
-  const history = await maybeCompact(botId, prepareHistoryForModel(botId, selectedModel));
+  const prompt = await systemPrompt(userId, botId);
+  const overheadChars = JSON.stringify(prompt).length + JSON.stringify(tools).length;
+  const history = await maybeCompact(botId, prepareHistoryForModel(botId, selectedModel), { overheadChars });
   // The model is only called when no approval is pending, so every orphaned call can be repaired.
-  const input = [{ role: 'system', content: await systemPrompt(userId, botId) }, ...pruneImages(repairHistory(history))];
-  assertContextBudget(botId, history, JSON.stringify(input[0]).length + JSON.stringify(tools).length);
+  const input = [{ role: 'system', content: prompt }, ...pruneImages(repairHistory(history))];
+  assertContextBudget(botId, history, overheadChars);
 
   const body: any = {
     model: selectedModel,
@@ -334,8 +348,8 @@ async function callModel(ctx: ToolCtx, tools: any[], signal: AbortSignal): Promi
   }
   if (msgSeq !== null) flush(false);
   if (!final) throw new Error('model stream ended without a response');
-  if (final.usage?.input_tokens) noteUsage(botId, final.usage.input_tokens, history.length);
-  prepareHistoryForModel(botId, body.model);
+  const measuredHistory = prepareHistoryForModel(botId, body.model);
+  if (final.usage?.input_tokens) noteUsage(botId, final.usage.input_tokens, measuredHistory.length, { model: body.model, overheadChars: JSON.stringify(prompt).length + JSON.stringify(body.tools).length });
   return { output: final.output ?? [] };
 }
 

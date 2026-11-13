@@ -16,6 +16,7 @@ import type { LibraryFile, Memory, Skill } from './types.js';
 import { activeMemories } from './bot-memory.js';
 import { allowedDevice, allowedSources, setDeviceToken } from './knowledge-policy.js';
 import { callMcpTool, listMcpTools, mcpDevices } from './t3-mcp.js';
+import { pairMcpDevice } from './t3-pairing.js';
 
 /**
  * Bot settings, skills, library, computer controls and memory maintenance.
@@ -69,6 +70,16 @@ configApi.post('/bots/:id/mcp/:device/token', async (c) => {
     setDeviceToken(bot.user_id, bot.id, c.req.param('device'), body.token, body.expiresAt);
     return c.json({ ok: true });
   } catch { return c.json({ error: 'Invalid token, expiry, or device grant.' }, 400); }
+});
+
+configApi.post('/bots/:id/mcp/:device/pair', async (c) => {
+  const bot = ownBot(c.get('user').id, c.req.param('id'));
+  if (!bot) return c.json({ error: 'not found' }, 404);
+  try { allowedDevice(bot.user_id, bot.id, c.req.param('device')); }
+  catch { return c.json({ error: 'Device access denied.' }, 403); }
+  const body = await c.req.json().catch(() => ({}));
+  try { return c.json(await pairMcpDevice(bot.user_id, bot.id, c.req.param('device'), body.code)); }
+  catch { return c.json({ error: 'Pairing failed. Create a fresh pairing link in the running T3 app for this device and try again.' }, 400); }
 });
 
 configApi.post('/bots/:id/mcp/:device/test', async (c) => {

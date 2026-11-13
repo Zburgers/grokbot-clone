@@ -1,9 +1,9 @@
 import { db, now } from '../db.js';
 import '../db-config.js';
 import { env } from '../env.js';
-import { newId } from '../lib/ids.js';
+import { sha256 } from '../lib/ids.js';
 import { hub } from '../lib/hub.js';
-import { getBotRow, getLive } from '../store.js';
+import { getBotRow, getLive, loadHistory } from '../store.js';
 import { isXai, llmClient, modelFor, shouldFallback } from '../llm.js';
 import { activeMemories, saveMemory } from '../bot-memory.js';
 
@@ -72,22 +72,28 @@ export function estimateChars(items: any[]): number {
   return total;
 }
 
-/** Real input size from the last model call: `items` history items cost `inputTokens` (system prompt included). */
-const usage = new Map<string, { generation: number; items: number; inputTokens: number }>();
+/** Reserve for prompts/tool schemas until an actual request supplies its overhead estimate. */
+const DEFAULT_OVERHEAD_CHARS = 40_000;
 /** History length right after the last compaction, to require real growth before compacting again. */
 const lastCompaction = new Map<string, { generation: number; items: number }>();
 
-export function noteUsage(botId: string, inputTokens: number, items: number) {
+export function noteUsage(botId: string, inputTokens: number, items: number, options: { model?: string; overheadChars?: number } = {}) {
   const bot = getBotRow(botId);
-  if (bot) usage.set(botId, { generation: bot.generation, items, inputTokens });
+  if (!bot || !Number.isFinite(inputTokens) || inputTokens <= 0 || !Number.isInteger(items) || items < 0) return;
+  const history = loadHistory(botId).slice(0, items);
+  if (history.length !== items) return;
+  db.prepare('INSERT INTO memory_usage(bot_id,generation,input_items,input_tokens,overhead_chars,model,prefix_hash) VALUES (?,?,?,?,?,?,?) ON CONFLICT(bot_id) DO UPDATE SET generation=excluded.generation,input_items=excluded.input_items,input_tokens=excluded.input_tokens,overhead_chars=excluded.overhead_chars,model=excluded.model,prefix_hash=excluded.prefix_hash')
+    .run(botId, bot.generation, items, inputTokens, options.overheadChars ?? DEFAULT_OVERHEAD_CHARS, options.model ?? (bot.history_model || modelFor(bot)), sha256(JSON.stringify(history)));
 }
 
 /** Best estimate (in chars) of the history's size: last measured usage plus an estimate for items added since. */
-export function historySize(botId: string, items: any[]): number {
+export function historySize(botId: string, items: any[], overheadChars = DEFAULT_OVERHEAD_CHARS): number {
   const bot = getBotRow(botId);
-  const u = usage.get(botId);
-  if (u && bot && u.generation === bot.generation && u.items <= items.length) return u.inputTokens * 4 + estimateChars(items.slice(u.items));
-  return estimateChars(items);
+  const u = db.prepare('SELECT * FROM memory_usage WHERE bot_id=?').get(botId) as any;
+  if (u && bot && u.generation === bot.generation && u.model === (bot.history_model || modelFor(bot)) && u.input_items <= items.length && u.prefix_hash === sha256(JSON.stringify(items.slice(0, u.input_items)))) {
+    return Math.max(0, u.input_tokens * 4 - u.overhead_chars) + overheadChars + estimateChars(items.slice(u.input_items));
+  }
+  return estimateChars(items) + overheadChars;
 }
 
 const isUserMsg = (it: any) => it?.role === 'user' && it?.type !== 'function_call_output';
@@ -104,7 +110,8 @@ function boundaries(items: any[]): { turns: number[]; any: number[] } {
     const it = items[i];
     if (i > 0 && open.size === 0) {
       if (isUserMsg(it)) turns.push(i);
-      if (it?.type !== 'function_call_output' && items[i - 1]?.type !== 'reasoning' && items[i - 1]?.type !== 'compaction') any.push(i);
+      const previous = items[i - 1];
+      if (it?.type !== 'function_call_output' && (previous?.type === 'message' || previous?.role === 'assistant' || previous?.type === 'function_call_output')) any.push(i);
     }
     if (it?.type === 'function_call') open.add(it.call_id);
     if (it?.type === 'function_call_output') open.delete(it.call_id);
@@ -134,8 +141,9 @@ const SUMMARY_PROMPT = `You compress a long-running AI assistant conversation so
 Write a dense summary for the assistant itself (not for the user). Keep:
 - who the user is, their goals, preferences and standing instructions
 - decisions made, facts learned, names, numbers, URLs, file paths, IDs and account details (never passwords or secrets)
-- what was done with which tools and the outcomes, including failures and what not to retry
+- what was done with which tools and the outcomes
 - open tasks, promises made, and anything the assistant is waiting on
+Label network/auth/tool failures and capability claims as dated historical observations. Never turn a past failure into a permanent prohibition or an obsolete capability claim into a current limitation. Preserve explicit user denials with their exact action/scope. Current system instructions, available tools and corrected active memories take precedence over historical observations.
 Drop pleasantries and step-by-step narration. Use short bullet points grouped under a few headings. Stay under 1,500 words.`;
 
 function textOf(content: any): string {
@@ -179,7 +187,7 @@ async function compactWithSummary(old: any[], model: string): Promise<any[]> {
   if (!text) throw new Error('summary was empty');
   // Earlier xAI compaction items can't be read back as text, so carry them over unchanged.
   const carried = old.filter((it) => it?.type === 'compaction');
-  return [...carried, { role: 'user', content: `[Automatic summary of the earlier conversation, made to save space. Treat it as your own notes.]\n${text}` }];
+  return [...carried, { role: 'user', content: `[Historical summary of the earlier conversation, made to save space. Current system instructions, tools and corrected active memories take precedence over these notes.]\n${text}` }];
 }
 
 const compactCooldown = new Map<string, number>();
@@ -192,9 +200,9 @@ function recordCompactFailure(botId: string) {
 }
 
 /** Conservative application guard, not a claim about the provider's maximum context. */
-export function assertContextBudget(botId: string, items: any[], overheadChars = 0) {
+export function assertContextBudget(botId: string, items: any[], overheadChars = DEFAULT_OVERHEAD_CHARS) {
   const hardChars = Math.max(memoryConfig.compactChars, num(process.env.GROKBOT_CONTEXT_MAX_TOKENS, memoryConfig.compactChars / 2) * 4);
-  if (historySize(botId, items) + overheadChars > hardChars) throw new Error('Conversation exceeded its safe context budget. Retry summarizing in Memories, or start a new conversation. Persistent memories and the transcript are retained.');
+  if (historySize(botId, items, overheadChars) > hardChars) throw new Error('Conversation exceeded its safe context budget. Retry summarizing in Memories, or start a new conversation. Persistent memories and the transcript are retained.');
 }
 
 /**
@@ -202,9 +210,9 @@ export function assertContextBudget(botId: string, items: any[], overheadChars =
  * (it is called from the agent loop before each model call), so it never races a turn.
  * Returns the history to send.
  */
-export async function maybeCompact(botId: string, items: any[], opts: { force?: boolean } = {}): Promise<any[]> {
+export async function maybeCompact(botId: string, items: any[], opts: { force?: boolean; overheadChars?: number } = {}): Promise<any[]> {
   const limit = memoryConfig.compactChars;
-  const before = historySize(botId, items);
+  const before = historySize(botId, items, opts.overheadChars);
   if (!opts.force && before <= limit) return items;
   if (!opts.force && (compactCooldown.get(botId) ?? 0) > now()) return items;
   if (db.prepare('SELECT 1 FROM pending_turns WHERE bot_id=?').get(botId)) return items; // unpaired calls; wait
@@ -258,7 +266,7 @@ export async function maybeCompact(botId: string, items: any[], opts: { force?: 
   db.prepare('UPDATE memory_jobs SET compact_error=NULL,compact_error_at=NULL WHERE bot_id=?').run(botId);
   compactCooldown.delete(botId);
   hub.emit(bot.user_id, { type: 'memories', botId });
-  usage.delete(botId); // indices changed; the next model call measures the compacted history
+  db.prepare('DELETE FROM memory_usage WHERE bot_id=?').run(botId); // the next call measures the new history
   lastCompaction.set(botId, { generation: bot.generation, items: next.length });
   console.log(`[memory] compacted ${bot.name} (${botId}) via ${method}: ${items.length} items/${before} chars -> ${next.length} items/${estimateChars(next)} chars, kept ${keep.length} recent, ${Date.now() - t0}ms`);
   return next;

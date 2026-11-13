@@ -47,6 +47,7 @@ export const configApi = {
   correctMemory: (id: string, text: string) => req<{ memory: Memory }>('PATCH', `/memories/${id}`, { text }),
   compact: (botId: string) => req<{ compacted: boolean }>('POST', `/bots/${botId}/compact?force=1`),
   setMcpToken: (botId: string, device: string, token: string) => req<{ ok: true }>('POST', `/bots/${botId}/mcp/${encodeURIComponent(device)}/token`, { token }),
+  pairMcp: (botId: string, device: string, code: string) => req<{ ok: true }>('POST', `/bots/${botId}/mcp/${encodeURIComponent(device)}/pair`, { code }),
   testMcp: (botId: string, device: string) => req<{ ok: true; toolCount: number }>('POST', `/bots/${botId}/mcp/${encodeURIComponent(device)}/test`),
 
   createSkill: (botId: string, s: Pick<Skill, 'name' | 'description' | 'body'>) => req<{ skill: Skill }>('POST', `/bots/${botId}/skills`, s),
