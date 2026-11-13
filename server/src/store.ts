@@ -206,3 +206,12 @@ export const listRoutines = (botId: string) => (db.prepare('SELECT * FROM routin
 
 export const toTask = (r: any): Task => ({ id: r.id, botId: r.bot_id, title: r.title, state: r.state, note: r.note, updatedAt: r.updated_at });
 export const listTasks = (botId: string) => (db.prepare('SELECT * FROM tasks WHERE bot_id=? ORDER BY updated_at DESC').all(botId) as any[]).map(toTask);
+
+export function updateTask(botId: string, taskId: string, state: Task['state'], note?: string): Task | null {
+  if (!['working', 'needs_input', 'done'].includes(state)) return null;
+  const result = db.prepare('UPDATE tasks SET state=?, note=COALESCE(?,note), updated_at=? WHERE id=? AND bot_id=?').run(state, note ?? null, now(), taskId, botId);
+  if (!result.changes) return null;
+  const bot = getBotRow(botId);
+  hub.emit(bot.user_id, { type: 'tasks', botId });
+  return toTask(db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId));
+}

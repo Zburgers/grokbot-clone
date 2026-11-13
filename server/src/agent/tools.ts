@@ -5,7 +5,7 @@ import { newId } from '../lib/ids.js';
 import { hub } from '../lib/hub.js';
 import { box as orgo } from '../box.js';
 import { screenFor } from '../computer.js';
-import { appendRow, getBotRow, listRoutines, toRoutine, describeCron } from '../store.js';
+import { appendRow, getBotRow, listRoutines, listTasks, updateTask, toRoutine, describeCron } from '../store.js';
 import { executeComposio, innerToolSlugs, isReadOnlySlug, toolkitInfo } from '../composio.js';
 import { scheduleRoutine, unscheduleRoutine } from '../routines.js';
 import { createEventRoutine, deleteEventTrigger, describeEvent, listTriggerTypes } from '../triggers.js';
@@ -334,15 +334,22 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: 'list_tasks',
+    description: 'List your saved task checklist, including IDs, states, and notes. Use these IDs to settle completed work with update_task; a task record is not a running background job.',
+    parameters: obj({}),
+    activity: 'working',
+    label: 'Checking tasks',
+    impl: async (_a, ctx) => ({ output: JSON.stringify(listTasks(ctx.botId)) }),
+  },
+  {
     name: 'update_task',
     description: 'Update a task: state is working, needs_input, or done.',
     parameters: obj({ task_id: { type: 'string' }, state: { type: 'string', enum: ['working', 'needs_input', 'done'] }, note: { type: 'string' } }, ['task_id', 'state']),
     activity: 'working',
     label: 'Updating a task',
     impl: async (a, ctx) => {
-      db.prepare('UPDATE tasks SET state=?, note=COALESCE(?, note), updated_at=? WHERE id=? AND bot_id=?').run(a.state, a.note ?? null, now(), a.task_id, ctx.botId);
-      hub.emit(ctx.userId, { type: 'tasks', botId: ctx.botId });
-      return { output: 'Updated.' };
+      const task = updateTask(ctx.botId, a.task_id, a.state, a.note);
+      return { output: task ? JSON.stringify(task) : 'Task not found on your checklist, or invalid state.' };
     },
   },
   {

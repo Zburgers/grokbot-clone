@@ -6,7 +6,7 @@ import { env } from './env.js';
 import { newId } from './lib/ids.js';
 import { hub } from './lib/hub.js';
 import { createSession, destroySession, requireUser, userFromCookieHeader, type AuthVars } from './lib/auth.js';
-import { allLive, appendRow, clearConversation, emitBot, getBot, getBotRow, getLive, getRow, listBots, listRoutines, listRows, listTasks, toRoutine, updateRow } from './store.js';
+import { allLive, appendRow, clearConversation, emitBot, getBot, getBotRow, getLive, getRow, listBots, listRoutines, listRows, listTasks, updateTask, toRoutine, updateRow } from './store.js';
 import { enqueue, interrupt, resolveApproval } from './agent/loop.js';
 import { computerState, ensureComputer, refreshComputer, suspendComputer } from './computer.js';
 import { box as orgo } from './box.js';
@@ -314,6 +314,15 @@ api.delete('/routines/:id', async (c) => {
 api.get('/bots/:id/tasks', (c) => {
   const b = ownBot(c.get('user').id, c.req.param('id'));
   return b ? c.json({ tasks: listTasks(b.id) }) : c.json({ error: 'not found' }, 404);
+});
+
+api.patch('/tasks/:id', async (c) => {
+  const task = db.prepare('SELECT t.* FROM tasks t JOIN bots b ON b.id=t.bot_id WHERE t.id=? AND b.user_id=?').get(c.req.param('id'), c.get('user').id) as any;
+  if (!task) return c.json({ error: 'not found' }, 404);
+  const p = await c.req.json().catch(() => ({}));
+  if (!['working', 'needs_input', 'done'].includes(p.state)) return c.json({ error: 'Invalid task state.' }, 400);
+  if (p.note !== undefined && (typeof p.note !== 'string' || p.note.length > 4000)) return c.json({ error: 'Invalid task note.' }, 400);
+  return c.json({ task: updateTask(task.bot_id, task.id, p.state, p.note) });
 });
 
 api.get('/tasks', (c) => {

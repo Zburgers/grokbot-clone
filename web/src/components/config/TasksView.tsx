@@ -10,7 +10,7 @@ import './ui';
 
 type Filter = 'all' | 'open' | 'done';
 
-const STATE_LABEL: Record<Task['state'], string> = { working: 'Working on it', needs_input: 'Waiting on you', done: 'Done' };
+const STATE_LABEL: Record<Task['state'], string> = { working: 'Open', needs_input: 'Waiting on you', done: 'Done' };
 
 function when(t: Task): string {
   const r = relativeShort(t.updatedAt);
@@ -19,8 +19,17 @@ function when(t: Task): string {
 }
 
 function TaskRow({ t, bot, showBot }: { t: Task; bot?: Bot; showBot: boolean }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const settle = async () => {
+    setSaving(true); setError('');
+    try { await configApi.setTask(t.id, t.state === 'done' ? 'working' : 'done'); useConfigUI.getState().bump('tasks'); useConfigUI.getState().bump(`tasks:${t.botId}`); }
+    catch (e) { setError((e as Error).message); }
+    finally { setSaving(false); }
+  };
   const open = () => { if (bot) { useStore.getState().selectBot(bot.id); useConfigUI.getState().setView('chat'); } };
   return (
+    <div className="task-row-shell">
     <button type="button" className={`task-row is-${t.state}`} onClick={open} disabled={!bot} title={bot ? `Open ${bot.name}` : undefined}>
       <span className={`task-row__check is-${t.state}`} aria-hidden>{t.state === 'done' ? <Glyph name="check_circle" size={18} /> : <span className="task-row__ring" />}</span>
       <span className="task-row__text">
@@ -33,6 +42,9 @@ function TaskRow({ t, bot, showBot }: { t: Task; bot?: Bot; showBot: boolean }) 
       </span>
       <span className={`task-chip is-${t.state}`}>{STATE_LABEL[t.state]}</span>
     </button>
+    <button type="button" className="cfg-btn cfg-btn--secondary" onClick={settle} disabled={saving} aria-label={`${t.state === 'done' ? 'Reopen' : 'Mark done'}: ${t.title}`}>{saving ? 'Saving…' : t.state === 'done' ? 'Reopen' : 'Mark done'}</button>
+    {error && <div role="alert">{error}</div>}
+    </div>
   );
 }
 
@@ -66,7 +78,7 @@ export function TasksView() {
       <header className="tasks-view__header">
         <div className="tasks-view__title">Tasks</div>
         <div className="segmented" role="tablist" aria-label="Filter tasks">
-          {([['open', `In progress${counts.open ? ` ${counts.open}` : ''}`], ['done', 'Done'], ['all', 'All']] as [Filter, string][]).map(([f, label]) => (
+          {([['open', `Open${counts.open ? ` ${counts.open}` : ''}`], ['done', 'Done'], ['all', 'All']] as [Filter, string][]).map(([f, label]) => (
             <button key={f} type="button" role="tab" aria-selected={filter === f} className={filter === f ? 'is-active' : ''} onClick={() => setFilter(f)}>{label}</button>
           ))}
         </div>

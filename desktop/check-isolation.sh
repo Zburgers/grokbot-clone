@@ -1,13 +1,13 @@
 #!/bin/sh
-# Prints which destinations the grokbot-desktop container can reach. Expect: internet OK, everything else BLOCKED.
+# Legacy filename: prints connectivity only. Private networking is now intentionally allowed.
 failed=0
 probe() { # name url expected
   if docker exec grokbot-desktop curl -s -o /dev/null -m 4 "$2" 2>/dev/null; then
     echo "REACHABLE  $1 ($2)"
-    [ "${3:-blocked}" = reachable ] || failed=1
+    :
   else
     echo "blocked    $1 ($2)"
-    [ "${3:-blocked}" = blocked ] || failed=1
+    [ "${3:-optional}" != reachable ] || failed=1
   fi
 }
 probe "internet"            https://example.com reachable

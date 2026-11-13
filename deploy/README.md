@@ -13,23 +13,27 @@ in `data/owner-password.txt` (mode 600). Voice and Google login are disabled; Co
 for app connections. GPT-6 Luna is selected through the existing localhost CLIProxyAPI endpoint,
 with the configured Gemini fallback. Availability depends on those accounts and their quotas.
 
-## Finish desktop isolation (root required)
+## Desktop networking
 
-From the project root:
+The desktop uses normal Docker outbound networking, including the host, LAN, and Tailscale routes.
+`desktop-firewall.sh` removes the deployment's old custom private-network restrictions. It does
+not flush unrelated host firewall rules. The non-root desktop and its named volume remain in Docker.
+
+To update an existing deployment to normal networking:
 
 ```sh
-sudo ./deploy/install-desktop-service.sh
+sudo ./deploy/relax-network.sh
 ```
 
-The installer stops the desktop, installs a systemd unit and a root-owned firewall script, applies
-rules, then starts and verifies the desktop. It leaves the desktop stopped if verification fails.
-The container uses `restart=no`: the system unit applies firewall rules before starting it at boot.
-Rules affect only traffic originating on `br-grokbot`, preserving responses to host-initiated API
-connections. New connections to host services and private networks are blocked, public IPv4 internet
-access is retained, and IPv6 from that bridge is blocked. Docker's existing rules are not flushed.
-The desktop has no host bind mounts, Docker socket, or extra capabilities.
+Create a local ignored `deploy/device-hosts` file first, with one IPv4 address followed by its
+private device hostname (and optional aliases) per line. The installer copies this to
+`/etc/grokbot/device-hosts`. The service restores these mappings inside the desktop at each start,
+since public DNS does not resolve private tailnet names reliably. This file contains addresses,
+not credentials. Use the real addresses reported by `tailscale status` on your own network.
 
-Until this step succeeds, text chat works but computer tools are unavailable.
+Private MCP connectivity still requires a supported MCP client and server authentication.
+Remembering a URL does not register an MCP connection. HTTP 401 means the server was reached and
+requires credentials; connection timeouts indicate a routing, DNS, firewall, or service issue.
 
 ## Operations
 

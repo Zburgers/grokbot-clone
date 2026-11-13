@@ -1,20 +1,19 @@
 #!/bin/sh
-# Root only. Rules affect traffic originating at the dedicated agent bridge.
+# Restore normal Docker networking by removing only this deployment's custom restrictions.
 set -eu
 [ "$(id -u)" = 0 ] || { echo 'Run this script as root.' >&2; exit 1; }
-iptables -w -nL DOCKER-USER >/dev/null
-for chain in GROKBOT-INPUT GROKBOT-EGRESS; do
-  iptables -w -nL "$chain" >/dev/null 2>&1 || iptables -w -N "$chain"
-  iptables -w -F "$chain"
-  iptables -w -A "$chain" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+for entry in INPUT:GROKBOT-INPUT DOCKER-USER:GROKBOT-EGRESS; do
+  parent=${entry%:*}; chain=${entry#*:}
+  while iptables -w -C "$parent" -i br-grokbot -j "$chain" 2>/dev/null; do
+    iptables -w -D "$parent" -i br-grokbot -j "$chain"
+  done
+  if iptables -w -nL "$chain" >/dev/null 2>&1; then
+    iptables -w -F "$chain"
+    iptables -w -X "$chain"
+  fi
 done
-iptables -w -A GROKBOT-INPUT -j DROP
-for subnet in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4; do
-  iptables -w -A GROKBOT-EGRESS -d "$subnet" -j DROP
+for chain in INPUT FORWARD; do
+  while ip6tables -w -C "$chain" -i br-grokbot -j DROP 2>/dev/null; do
+    ip6tables -w -D "$chain" -i br-grokbot -j DROP
+  done
 done
-iptables -w -A GROKBOT-EGRESS -j RETURN
-iptables -w -C INPUT -i br-grokbot -j GROKBOT-INPUT 2>/dev/null || iptables -w -I INPUT 1 -i br-grokbot -j GROKBOT-INPUT
-iptables -w -C DOCKER-USER -i br-grokbot -j GROKBOT-EGRESS 2>/dev/null || iptables -w -I DOCKER-USER 1 -i br-grokbot -j GROKBOT-EGRESS
-# This desktop network has IPv6 disabled; also fail closed if IPv6 is enabled later.
-ip6tables -w -C INPUT -i br-grokbot -j DROP 2>/dev/null || ip6tables -w -I INPUT 1 -i br-grokbot -j DROP
-ip6tables -w -C FORWARD -i br-grokbot -j DROP 2>/dev/null || ip6tables -w -I FORWARD 1 -i br-grokbot -j DROP

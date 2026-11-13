@@ -1,5 +1,5 @@
 import { db } from '../db.js';
-import { getBotRow, listRoutines } from '../store.js';
+import { getBotRow, listRoutines, listTasks } from '../store.js';
 import { connectedToolkits } from '../composio.js';
 import { memoriesForPrompt } from './memory.js';
 
@@ -14,6 +14,7 @@ export async function systemPrompt(userId: string, botId: string): Promise<strin
   const memories = mem.lines.length ? mem.lines.join('\n') + (mem.omitted ? `\n(${mem.omitted} older memories not shown; use recall to search them.)` : '') : '';
   const skills = (db.prepare('SELECT name, body FROM skills WHERE bot_id=?').all(botId) as any[]).map((s) => `### ${s.name}\n${s.body}`).join('\n\n');
   const routines = listRoutines(botId).map((r) => `- ${r.name} (${r.id}): ${r.enabled ? r.description : 'paused'}; ${r.prompt.slice(0, 120)}`).join('\n');
+  const tasks = listTasks(botId).filter((t) => t.state !== 'done').slice(0, 30).map((t) => `- ${t.id}: ${t.title} [${t.state}]${t.note ? ` — ${t.note.slice(0, 500)}` : ''}`).join('\n');
   let apps = '';
   try { apps = [...(await connectedToolkits(userId))].join(', '); } catch { apps = '(unavailable)'; }
 
@@ -26,6 +27,7 @@ ${bot.mode === 'teammate' ? 'You are a team Bot shared with teammates.' : 'You a
 - Prefer connected apps (Composio tools) over the browser when an app is connected: they are faster and more reliable. Use COMPOSIO_SEARCH_TOOLS to discover the right tool, then COMPOSIO_MULTI_EXECUTE_TOOL to run it. If an app isn't connected, call request_app_connection.
 - Some actions need the user's approval; the system asks them for you. If a request is denied, don't retry it; find another way or tell the user.
 - Use ask_user for real decisions only. Use create_task to track multi-part requests. Use create_routine when asked to do something on a schedule.
+- Tasks are a persistent checklist, not background jobs. Use list_tasks to find existing work before creating duplicates. Before reporting work finished, call update_task with done and a short outcome. If work is blocked, use needs_input and state the exact missing input. Reuse the task when the user answers, and do not mark unfinished work done merely because a turn ended.
 - Use remember for durable facts about the user and their preferences.
 - When the user asks for a new permanent Bot or teammate, use create_bot. Include their role, standing instructions, and all relevant project context; then use send_to_bot to hand off work. Native Bots do not need a Composio app or external bot service. Use spawn_subagent only for temporary helpers.
 - Use send_to_bot to delegate to another Bot on the team when their job fits better.
@@ -40,6 +42,7 @@ ${bot.mode === 'teammate' ? 'You are a team Bot shared with teammates.' : 'You a
 - User: ${user?.name ?? ''} <${user?.email ?? ''}>
 - Connected apps: ${apps || 'none yet'}
 ${team ? `- Other Bots on the team:\n${team}` : '- You are the only Bot on the team so far.'}
+${tasks ? `\n## Your open tasks\n${tasks}` : ''}
 ${routines ? `\n## Your routines\n${routines}` : ''}
 ${memories ? `\n## What you remember\n${memories}` : ''}
 ${skills ? `\n## Your skills\n${skills}` : ''}

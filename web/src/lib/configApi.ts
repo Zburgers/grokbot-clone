@@ -52,6 +52,7 @@ export const configApi = {
   runRoutine: (id: string) => req<{ ok: true }>('POST', `/routines/${id}/run`),
   deleteRoutine: (id: string) => req<{ ok: true }>('DELETE', `/routines/${id}`),
 
+  setTask: (id: string, state: Task['state']) => req<{ task: Task }>('PATCH', `/tasks/${id}`, { state }),
   tasks: () => req<{ tasks: Task[] }>('GET', '/tasks'),
   botTasks: (botId: string) => req<{ tasks: Task[] }>('GET', `/bots/${botId}/tasks`),
 

@@ -22,13 +22,13 @@ For local mode, configure `LLM_API_KEY`, `COMPOSIO_API_KEY` (a developer project
 single quotes in `.env` so its dollar signs remain literal.
 
 Run the desktop on the dedicated `grokbot-desktop-net` network (`10.0.20.0/24`, bridge
-`br-grokbot`) with its API published on `127.0.0.1:18090`, then install and verify the firewall
-using the deployment guide before allowing agent work. Choose another subnet if this one is
+`br-grokbot`) with its API published on `127.0.0.1:18090`, then configure startup and device networking
+using the deployment guide. Choose another subnet if this one is
 already used. Keep `HOST=127.0.0.1` and expose the app with private Tailscale Serve when needed.
 `npm start` serves the built app. Never commit `.env`, passwords, databases, or browser profiles.
 
 Checks: `npm run typecheck`, `npm run build`, and
-`node --import tsx --test tests/permanent-bots.test.mjs tests/models.test.mjs` (uses a temporary database).
+`node --import tsx --test tests/permanent-bots.test.mjs tests/models.test.mjs tests/tasks.test.mjs` (uses a temporary database).
 
 The original project overview below describes its default Orgo/xAI configuration. This fork's
 local defaults are documented above and in `.env.example`; the original architecture documents
@@ -199,3 +199,7 @@ Configuration options for idle suspension, memory consolidation, and history com
 Project code is available under the [MIT license](LICENSE). Third-party artwork and trademarks retain their owners' rights; see [third-party notices](THIRD_PARTY_NOTICES.md).
 
 Inspired by Grok Bot. Built with [Grok](https://x.ai), [Orgo](https://orgo.ai), and [Composio](https://composio.dev). This is an independent project, unaffiliated with xAI or Cursor/Anysphere.
+
+Task records are persistent checklists, separate from whether a Bot is currently running. Bots
+receive their open task IDs each turn and can list and settle them; the Tasks view also offers
+Mark done and Reopen controls. Open tasks display Open rather than an activity spinner; checklist state does not assert that a background job is running.

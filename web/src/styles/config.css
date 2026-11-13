@@ -136,7 +136,6 @@
 .task-row__check { display: flex; align-items: center; justify-content: center; width: 18px; height: 18px; margin-top: 1px; flex-shrink: 0; color: var(--color-success); }
 .task-row__ring { width: 15px; height: 15px; border-radius: 50%; border: 1.5px solid var(--color-text-quaternary); }
 .task-row__check.is-needs_input .task-row__ring { border-color: var(--color-warn); border-style: solid; box-shadow: var(--color-warn) 0 0 0 2px inset; opacity: 0.9; }
-.task-row__check.is-working .task-row__ring { border-color: var(--color-success); border-top-color: transparent; animation: cfg-spin 1.4s linear infinite; }
 .task-row__text { display: flex; flex-direction: column; gap: 2px; flex: 1 1 0; min-width: 0; }
 .task-row__title { font-size: 13px; font-weight: 500; line-height: 18px; color: var(--color-text-primary); overflow-wrap: anywhere; }
 .task-row.is-done .task-row__title { color: var(--color-text-secondary); }
@@ -214,3 +213,7 @@
 
 /* knob contrasts with the "on" track (matters for black bots in dark mode) */
 .toggle.is-on .toggle__knob { background: var(--bot-on-action, #FFFFFF); }
+
+.task-row-shell { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.task-row-shell > .task-row { flex: 1; min-width: 0; }
+.task-row-shell > [role="alert"] { width: 100%; color: var(--color-error); }
