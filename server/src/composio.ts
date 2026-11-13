@@ -9,7 +9,9 @@ export const composio = new Composio({ apiKey: env.composioKey, provider: new Op
 const REST = 'https://backend.composio.dev/api/v3.1';
 async function rest<T = any>(path: string): Promise<T> {
   const res = await fetch(`${REST}${path}`, { headers: { 'x-api-key': env.composioKey } });
-  if (!res.ok) throw new Error(`Composio ${path}: ${res.status} ${await res.text()}`);
+  if (!res.ok) throw new Error(res.status === 401 || res.status === 403
+    ? 'Composio rejected the configured API key. Update the Composio project API key on the server.'
+    : `Composio is unavailable (status ${res.status}). Please try again.`);
   return res.json() as Promise<T>;
 }
 

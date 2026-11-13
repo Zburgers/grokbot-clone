@@ -107,6 +107,7 @@ export function createIdleWatcher(deps: IdleDeps, opts: { idleMs: number; dryRun
 // ---------- production wiring ----------
 
 export function startIdleWatcher() {
+  if (process.env.COMPUTER_PROVIDER !== 'orgo') { console.log('[idle] local desktop: hibernation off'); return null; }
   const watcher = createIdleWatcher(
     {
       now: dbNow,

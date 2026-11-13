@@ -12,7 +12,7 @@ export type AuthVars = { Variables: { user: User } };
 export function createSession(c: Context, userId: string) {
   const t = token();
   db.prepare('INSERT INTO auth_sessions(token,user_id,created_at,expires_at) VALUES (?,?,?,?)').run(t, userId, now(), now() + TTL_MS);
-  setCookie(c, COOKIE, t, { httpOnly: true, sameSite: 'Lax', path: '/', maxAge: TTL_MS / 1000 });
+  setCookie(c, COOKIE, t, { httpOnly: true, sameSite: 'Lax', path: '/', maxAge: TTL_MS / 1000, secure: (process.env.APP_URL ?? '').startsWith('https://') });
 }
 
 export function destroySession(c: Context) {

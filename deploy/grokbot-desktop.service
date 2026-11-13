@@ -1,0 +1,18 @@
+[Unit]
+Description=Grokbot isolated local desktop
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/local/libexec/grokbot/desktop-firewall.sh
+ExecStart=/usr/bin/docker start grokbot-desktop
+ExecStop=/usr/bin/docker stop -t 20 grokbot-desktop
+TimeoutStartSec=45
+TimeoutStopSec=30
+
+[Install]
+WantedBy=docker.service

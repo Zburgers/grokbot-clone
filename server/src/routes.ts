@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { scryptSync, timingSafeEqual } from 'node:crypto';
 import { streamSSE } from 'hono/streaming';
 import { db, now } from './db.js';
 import { env } from './env.js';
@@ -8,35 +9,16 @@ import { createSession, destroySession, requireUser, userFromCookieHeader, type 
 import { allLive, appendRow, clearConversation, emitBot, getBot, getBotRow, getRow, listBots, listRoutines, listRows, listTasks, toRoutine, updateRow } from './store.js';
 import { enqueue, interrupt, resolveApproval } from './agent/loop.js';
 import { computerState, ensureComputer, refreshComputer, suspendComputer } from './computer.js';
-import { orgo } from './orgo.js';
+import { box as orgo } from './box.js';
 import { catalog, connectedToolkits, deleteConnection, disconnect, googleProfile, startConnect, startGoogleLogin, toolkitInfo } from './composio.js';
 import { runRoutine, scheduleRoutine, unscheduleRoutine } from './routines.js';
 import { deleteEventTrigger } from './triggers.js';
 import { dispatchRoomMessage } from './agent/rooms.js';
 import { voiceApi } from './voice.js';
-import type { AvatarColor, AvatarShape, Toolkit } from './types.js';
+import type { Toolkit } from './types.js';
+import { createBot } from './bots.js';
 
 export const api = new Hono<AuthVars>();
-
-const SHAPES: AvatarShape[] = ['blob', 'pebble', 'bean', 'egg', 'squircle', 'tablet', 'capsule', 'cylinder', 'hex', 'gem', 'crystal', 'wedge', 'shield', 'dome', 'arch', 'cloud', 'teardrop', 'leaf', 'square', 'sparkle', 'clover', 'flower', 'heart', 'house', 'star'];
-const COLORS: AvatarColor[] = ['black', 'brown', 'red', 'orange', 'yellow', 'green', 'cyan', 'blue', 'violet', 'magenta', 'gray'];
-
-function hashPick<T>(id: string, list: T[]): T {
-  let h = 0x811c9dc5;
-  for (const ch of id) { h ^= ch.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
-  return list[h % list.length];
-}
-
-function createBot(userId: string, b: { name: string; label?: string; description?: string; instructions?: string; avatarShape?: string; avatarColor?: string; mode?: string; isPrimary?: boolean }) {
-  const id = newId('bot');
-  const shape = SHAPES.includes(b.avatarShape as AvatarShape) ? b.avatarShape : hashPick(id, SHAPES.slice(0, 13));
-  const color = COLORS.includes(b.avatarColor as AvatarColor) ? b.avatarColor : hashPick(id, COLORS.filter((c) => c !== 'black'));
-  db.prepare(
-    'INSERT INTO bots(id,user_id,name,label,description,instructions,avatar_shape,avatar_color,mode,is_primary,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-  ).run(id, userId, b.name.trim().slice(0, 60) || 'New Bot', b.label ?? '', b.description ?? '', b.instructions ?? '', shape, color, b.mode === 'teammate' ? 'teammate' : 'personal', b.isPrimary ? 1 : 0, now(), now());
-  hub.emit(userId, { type: 'roster' });
-  return getBot(id)!;
-}
 
 function findOrCreateUser(email: string, name?: string, preferId?: string) {
   const existing = db.prepare('SELECT * FROM users WHERE lower(email)=lower(?)').get(email) as any;
@@ -49,12 +31,41 @@ function findOrCreateUser(email: string, name?: string, preferId?: string) {
 
 // ---------- auth ----------
 
+const features = () => ({ voice: env.voiceEnabled, googleLogin: env.googleLogin, passwordLogin: !!env.ownerPasswordHash });
+
 api.get('/auth/me', (c) => {
   const user = userFromCookieHeader(c.req.header('cookie'));
-  return c.json({ user, devLogin: env.devLogin });
+  return c.json({ user, devLogin: env.devLogin, features: features() });
+});
+
+// Single-owner password login. OWNER_PASSWORD_HASH = "scrypt$<salt hex>$<key hex>" (scripts/hash-password.mjs).
+const loginFails: number[] = [];
+function checkOwnerPassword(password: string): boolean {
+  const [alg, saltHex, keyHex] = env.ownerPasswordHash.split('$');
+  if (alg !== 'scrypt' || !saltHex || !keyHex) return false;
+  const want = Buffer.from(keyHex, 'hex');
+  const got = scryptSync(password, Buffer.from(saltHex, 'hex'), want.length);
+  return timingSafeEqual(got, want);
+}
+
+api.post('/auth/password', async (c) => {
+  if (!env.ownerPasswordHash) return c.json({ error: 'disabled' }, 403);
+  const t = Date.now();
+  while (loginFails.length && loginFails[0] < t - 10 * 60_000) loginFails.shift();
+  if (loginFails.length >= 10) return c.json({ error: 'Too many attempts. Try again in a few minutes.' }, 429);
+  const { password } = await c.req.json<{ password?: string }>().catch(() => ({ password: '' }));
+  if (!password || !checkOwnerPassword(String(password))) {
+    loginFails.push(t);
+    await new Promise((r) => setTimeout(r, 600));
+    return c.json({ error: 'Wrong password' }, 401);
+  }
+  const { id } = findOrCreateUser(env.ownerEmail, env.ownerName);
+  createSession(c, id);
+  return c.json({ ok: true });
 });
 
 api.get('/auth/google/start', async (c) => {
+  if (!env.googleLogin) return c.json({ error: 'disabled' }, 404);
   const attemptId = newId('login');
   const provisional = newId('usr');
   const cb = `${env.serverUrl}/api/auth/google/callback?attempt=${attemptId}`;
@@ -64,6 +75,7 @@ api.get('/auth/google/start', async (c) => {
 });
 
 api.get('/auth/google/callback', async (c) => {
+  if (!env.googleLogin) return c.json({ error: 'disabled' }, 404);
   const attempt = db.prepare('SELECT * FROM login_attempts WHERE id=?').get(c.req.query('attempt') ?? '') as any;
   const caId = c.req.query('connected_account_id') ?? attempt?.connected_account_id;
   if (!attempt || c.req.query('status') === 'failed' || !caId) return c.redirect(`${env.appUrl}/?login=failed`);
@@ -90,7 +102,6 @@ api.post('/auth/dev', async (c) => {
   createSession(c, id);
   return c.json({ ok: true });
 });
-
 api.post('/auth/logout', (c) => { destroySession(c); return c.json({ ok: true }); });
 
 // everything below requires a session
@@ -335,7 +346,13 @@ api.get('/apps', async (c) => {
   const user = c.get('user');
   const search = (c.req.query('search') ?? '').toLowerCase();
   const category = c.req.query('category') ?? '';
-  const [all, connected] = await Promise.all([catalog(), connectedToolkits(user.id).catch(() => new Set<string>())]);
+  let all: Awaited<ReturnType<typeof catalog>>;
+  try {
+    all = await catalog();
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 502);
+  }
+  const connected = await connectedToolkits(user.id).catch(() => new Set<string>());
   let items: Toolkit[] = all.map((t) => ({ ...t, connected: connected.has(t.slug) }));
   if (search) items = items.filter((t) => t.name.toLowerCase().includes(search) || t.slug.includes(search) || t.description?.toLowerCase().includes(search));
   if (category) items = items.filter((t) => t.categories.some((x) => x.toLowerCase() === category.toLowerCase()));
@@ -392,4 +409,4 @@ api.delete('/policies/:tool', (c) => {
   return c.json({ ok: true });
 });
 
-api.route('/voice', voiceApi);
+if (env.voiceEnabled) api.route('/voice', voiceApi);

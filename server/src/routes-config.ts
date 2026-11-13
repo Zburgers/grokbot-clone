@@ -1,3 +1,4 @@
+import { env } from './env.js';
 import { Hono } from 'hono';
 import { db, now } from './db.js';
 import './db-config.js';
@@ -6,7 +7,7 @@ import { hub } from './lib/hub.js';
 import { requireUser, type AuthVars } from './lib/auth.js';
 import { getBotRow, listRoutines, listTasks } from './store.js';
 import { computerState, ensureComputer } from './computer.js';
-import { orgo } from './orgo.js';
+import { box as orgo, isLocalBox } from './box.js';
 import { runInBotQueue } from './agent/loop.js';
 import { consolidateBot, historySize, maybeCompact, memoryConfig } from './agent/memory.js';
 import { idleConfig, viewerCount } from './idle.js';
@@ -127,9 +128,9 @@ configApi.post('/bots/:id/compact', async (c) => {
   return c.json({ itemsBefore: before, itemsAfter: after, compacted: after !== before });
 });
 
-// ---------- library: files under /root/grokbot/files/<botId> on the bot's computer ----------
+// ---------- library: files under <BOX_HOME>/files/<botId> on the bot's computer ----------
 
-const LIB_ROOT = '/root/grokbot/files';
+const LIB_ROOT = `${env.boxHome}/files`;
 
 function safeRel(p: string | undefined): string | null {
   const rel = (p ?? '').replace(/^\/+|\/+$/g, '');
@@ -190,6 +191,8 @@ configApi.post('/bots/:id/files/download', async (c) => {
   const { path } = await c.req.json<{ path: string }>().catch(() => ({ path: '' }));
   const rel = safeRel(path);
   if (!rel) return c.json({ error: 'bad path' }, 400);
+  // Local desktop: stream the file through our own (session-authenticated) route.
+  if (isLocalBox) return c.json({ url: `/api/bots/${b.id}/files/raw?path=${encodeURIComponent(rel)}` });
   try {
     const box = await boxFor(user.id, b.id, true);
     if (!box) return c.json({ error: 'computer unavailable' }, 409);
@@ -200,6 +203,24 @@ configApi.post('/bots/:id/files/download', async (c) => {
   } catch (e: any) {
     return c.json({ error: String(e?.message ?? e).slice(0, 300) }, 502);
   }
+});
+
+configApi.get('/bots/:id/files/raw', async (c) => {
+  const user = c.get('user');
+  const b = ownBot(user.id, c.req.param('id'));
+  if (!b) return c.json({ error: 'not found' }, 404);
+  const rel = safeRel(c.req.query('path'));
+  if (!rel || !isLocalBox) return c.json({ error: 'bad path' }, 400);
+  const r = await orgo.readFile(`${LIB_ROOT}/${b.id}/${rel}`).catch(() => null);
+  if (!r || !r.ok || !r.body) return c.json({ error: r?.status === 404 ? 'not found' : 'computer unavailable' }, r?.status === 404 ? 404 : 502);
+  const name = rel.split('/').pop()!.replace(/["\\\r\n]/g, '_');
+  return new Response(r.body, {
+    headers: {
+      'Content-Type': r.headers.get('content-type') ?? 'application/octet-stream',
+      'Content-Disposition': `attachment; filename="${name}"`,
+      'X-Content-Type-Options': 'nosniff',
+    },
+  });
 });
 
 // ---------- computer: screens, reset, hibernation ----------
@@ -223,7 +244,7 @@ configApi.post('/bots/:id/screen/reset', async (c) => {
   if (!lease) return c.json({ ok: true, note: 'no screen yet' });
   const comp = db.prepare("SELECT orgo_id FROM computers WHERE user_id=? AND status='running'").get(user.id) as any;
   if (!comp?.orgo_id) return c.json({ error: 'Wake the computer first' }, 409);
-  const profile = `/root/grokbot/profiles/${b.id}`;
+  const profile = `${env.boxHome}/profiles/${b.id}`;
   try {
     await orgo.bash(comp.orgo_id, undefined, `pkill -f ${shq(`user-data-dir=${profile}`)}; rm -f ${shq(profile)}/Singleton*; echo ok`, 30).catch(() => null);
     if (lease.screen_id !== 'default') {

@@ -1,10 +1,10 @@
-import OpenAI from 'openai';
 import { db, now } from '../db.js';
 import '../db-config.js';
 import { env } from '../env.js';
 import { newId } from '../lib/ids.js';
 import { hub } from '../lib/hub.js';
 import { getBotRow, getLive } from '../store.js';
+import { isXai, llmClient } from '../llm.js';
 
 /**
  * Memory over time:
@@ -13,7 +13,7 @@ import { getBotRow, getLive } from '../store.js';
  *  (c) a bounded, relevance-ranked memory section for the system prompt.
  */
 
-const xai = new OpenAI({ apiKey: env.xaiKey, baseURL: 'https://api.x.ai/v1', timeout: 300_000 });
+const llm = llmClient(300_000);
 
 const num = (v: string | undefined, d: number) => (v !== undefined && v !== '' && Number.isFinite(Number(v)) ? Number(v) : d);
 
@@ -26,7 +26,7 @@ export const memoryConfig = {
   consolidateIdleMin: num(process.env.GROKBOT_CONSOLIDATE_IDLE_MIN, 10),
   consolidateSweepSec: num(process.env.GROKBOT_CONSOLIDATE_SWEEP_SEC, 60),
   /** 'auto' tries xAI /responses/compact then falls back to a summary; 'summary' skips xAI compaction. */
-  compactMethod: process.env.GROKBOT_COMPACT_METHOD === 'summary' ? 'summary' : 'auto',
+  compactMethod: process.env.GROKBOT_COMPACT_METHOD === 'summary' || !isXai ? 'summary' : 'auto',
   /** Character budget for the memory section of the system prompt. */
   promptMemoryChars: num(process.env.GROKBOT_PROMPT_MEMORY_CHARS, 4000),
 };
@@ -153,7 +153,7 @@ export function renderTranscript(items: any[], maxChars = 200_000): string {
 }
 
 async function compactWithXai(old: any[]): Promise<any[]> {
-  const res: any = await xai.post('/responses/compact', { body: { model: env.xaiModel, input: old } });
+  const res: any = await llm.post('/responses/compact', { body: { model: env.llmModel, input: old } });
   const out = (res?.output ?? []) as any[];
   if (!out.length || !out.some((o) => o?.type === 'compaction' || o?.encrypted_content || o?.role)) throw new Error('compact returned no items');
   return out;
@@ -161,8 +161,8 @@ async function compactWithXai(old: any[]): Promise<any[]> {
 
 async function compactWithSummary(old: any[]): Promise<any[]> {
   const transcript = renderTranscript(old);
-  const res: any = await xai.responses.create({
-    model: env.xaiModel,
+  const res: any = await llm.responses.create({
+    model: env.llmModel,
     input: [{ role: 'system', content: SUMMARY_PROMPT }, { role: 'user', content: transcript }],
     store: false,
     reasoning: { effort: 'low' },
@@ -204,9 +204,10 @@ export async function maybeCompact(botId: string, items: any[], opts: { force?: 
   let method = 'xai-compact';
   let replaced: any[];
   try {
-    if (memoryConfig.compactMethod === 'summary') throw new Error('xAI compaction disabled by GROKBOT_COMPACT_METHOD=summary');
-    replaced = await compactWithXai(old);
+    if (memoryConfig.compactMethod === 'summary') { method = 'summary'; replaced = await compactWithSummary(old).catch((e) => { throw Object.assign(e, { skipXai: true }); }); }
+    else replaced = await compactWithXai(old);
   } catch (e: any) {
+    if (e?.skipXai) { console.error(`[memory] summary compaction failed for ${botId}: ${e?.message ?? e}`); compactCooldown.set(botId, now() + 10 * 60_000); return items; }
     console.warn(`[memory] compact via /responses/compact failed for ${botId}: ${e?.message ?? e}; falling back to a summary`);
     method = 'summary';
     try {
@@ -296,8 +297,8 @@ export async function consolidateBot(botId: string, opts: { upTo?: number } = {}
   if (transcript.length > 24_000) transcript = transcript.slice(-24_000);
 
   const existing = (db.prepare('SELECT text FROM memories WHERE bot_id=? ORDER BY created_at DESC LIMIT 200').all(botId) as any[]).map((m) => m.text as string);
-  const res: any = await xai.responses.create({
-    model: env.xaiModel,
+  const res: any = await llm.responses.create({
+    model: env.llmModel,
     input: [
       { role: 'system', content: CONSOLIDATE_PROMPT },
       { role: 'user', content: `EXISTING MEMORIES:\n${existing.length ? existing.map((t) => `- ${t}`).join('\n') : '(none)'}\n\nRECENT CONVERSATION:\n${transcript}` },

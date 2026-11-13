@@ -1,4 +1,3 @@
-import OpenAI from 'openai';
 import { db, now } from '../db.js';
 import { env } from '../env.js';
 import { newId, sha256 } from '../lib/ids.js';
@@ -6,12 +5,13 @@ import { hub } from '../lib/hub.js';
 import { appendHistory, appendRow, emitBot, getBotRow, getRow, loadHistory, setLive, updateRow } from '../store.js';
 import type { MessageBody, ToolCallBody } from '../types.js';
 import { composioTools, toolkitInfo } from '../composio.js';
+import { builtinTools, llmClient, shouldFallback } from '../llm.js';
 import { systemPrompt } from './prompt.js';
 import { repairHistory } from './history.js';
 import { maybeCompact, noteUsage } from './memory.js';
 import { activityFor, functionSchemas, humanizeSlug, policyFor, runComposioTool, toolMap, type ToolCtx, type ToolResult } from './tools.js';
 
-const xai = new OpenAI({ apiKey: env.xaiKey, baseURL: 'https://api.x.ai/v1', timeout: 360_000 });
+const llm = llmClient(360_000);
 
 export type Trigger =
   | { type: 'user'; text: string }
@@ -130,8 +130,7 @@ async function runTurn(botId: string, trigger: Trigger) {
     const tools = [
       ...functionSchemas(),
       ...(await composioTools(userId)),
-      { type: 'web_search' },
-      { type: 'x_search' },
+      ...builtinTools(),
     ];
 
     for (let step = 0; step < MAX_STEPS; step++) {
@@ -260,7 +259,7 @@ async function callModel(ctx: ToolCtx, tools: any[], signal: AbortSignal): Promi
   const input = [{ role: 'system', content: await systemPrompt(userId, botId) }, ...pruneImages(repairHistory(history))];
 
   const body: any = {
-    model: env.xaiModel,
+    model: env.llmModel,
     input,
     tools,
     reasoning: { effort: bot.effort ?? 'medium' },
@@ -273,13 +272,20 @@ async function callModel(ctx: ToolCtx, tools: any[], signal: AbortSignal): Promi
 
   let stream: any;
   try {
-    stream = await xai.responses.create(body, { signal });
+    stream = await llm.responses.create(body, { signal });
   } catch (e: any) {
     // If a Composio tool schema is rejected, retry with only our own tools.
-    if (e?.status === 400 && tools.length > functionSchemas().length + 2) {
+    if (e?.status === 400 && tools.length > functionSchemas().length + builtinTools().length) {
       console.warn('[agent] 400 with composio tools, retrying without:', e?.message);
-      body.tools = [...functionSchemas(), { type: 'web_search' }, { type: 'x_search' }];
-      stream = await xai.responses.create(body, { signal });
+      body.tools = [...functionSchemas(), ...builtinTools()];
+      stream = await llm.responses.create(body, { signal });
+    } else if (shouldFallback(e)) {
+      // Main model rate-limited / quota exhausted (e.g. Codex subscription window): use the backup.
+      console.warn(`[agent] ${env.llmModel} failed (${e?.status}), falling back to ${env.llmFallbackModel}:`, e?.message);
+      body.model = env.llmFallbackModel;
+      delete body.include; // encrypted reasoning from one model family can't be replayed into another
+      body.input = body.input.filter((it: any) => it?.type !== 'reasoning' && it?.type !== 'compaction');
+      stream = await llm.responses.create(body, { signal });
     } else throw e;
   }
 

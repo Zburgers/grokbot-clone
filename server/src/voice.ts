@@ -355,13 +355,13 @@ voiceApi.post('/tool', async (c) => {
   }
 });
 
-const xai = new OpenAI({ apiKey: env.xaiKey, baseURL: XAI, timeout: 45_000 });
+const xai = new OpenAI({ apiKey: env.xaiKey || 'voice-disabled', baseURL: XAI, timeout: 45_000 });
 
 async function summarizeCall(botName: string, transcript: { role: string; text: string }[], tasks: string[]): Promise<string | null> {
   if (!transcript.length && !tasks.length) return null;
   const lines = transcript.map((t) => `${t.role === 'user' ? 'User' : botName}: ${t.text}`).join('\n').slice(-12_000);
   const res: any = await xai.responses.create({
-    model: env.xaiModel,
+    model: process.env.XAI_MODEL ?? 'grok-4.7',
     reasoning: { effort: 'low' },
     store: false,
     input: [

@@ -142,9 +142,10 @@ export function ConnectAppsModal() {
   const moreActive = activeCategory !== null && !PILLS.some((p) => p.category === activeCategory);
 
   let body: React.ReactNode;
-  if (error) body = <div className="apps-empty">Couldn’t load apps. {error}</div>;
+  if (error) body = <div className="apps-empty" role="alert">Couldn’t load apps. {error}<br /><button type="button" className="btn btn--secondary" onClick={refresh}>Try again</button></div>;
   else if (!data && loading) body = <div className="apps-empty">Loading apps…</div>;
   else if (view.kind === 'connected') body = connectedApps.length ? <Section title="Connected" apps={connectedApps} onChanged={refresh} /> : <div className="apps-empty">No apps connected yet.</div>;
+  else if (data?.total === 0 && !searching && view.kind === 'all') body = <div className="apps-empty">No apps are available from Composio.<br /><button type="button" className="btn btn--secondary" onClick={refresh}>Try again</button></div>;
   else if (searching || view.kind === 'category') {
     body = apps.length ? (
       <Section title={searching ? `Results${activeCategory ? ` in ${pillLabel(activeCategory)}` : ''}` : pillLabel(activeCategory!)} apps={apps} onChanged={refresh} />

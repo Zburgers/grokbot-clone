@@ -1,7 +1,9 @@
+import { createBot } from '../bots.js';
+import { env } from '../env.js';
 import { db, now } from '../db.js';
 import { newId } from '../lib/ids.js';
 import { hub } from '../lib/hub.js';
-import { orgo } from '../orgo.js';
+import { box as orgo } from '../box.js';
 import { screenFor } from '../computer.js';
 import { appendRow, getBotRow, listRoutines, toRoutine, describeCron } from '../store.js';
 import { executeComposio, innerToolSlugs, isReadOnlySlug, toolkitInfo } from '../composio.js';
@@ -141,7 +143,7 @@ export const TOOLS: ToolDef[] = [
       const url = String(a.url).replace(/'/g, '%27');
       await onScreen(ctx, (c, s) => {
         const display = s === 'default' ? ':99' : `:${s.replace('screen-', '')}`;
-        const profile = `/root/grokbot/profiles/${ctx.botId}`;
+        const profile = `${env.boxHome}/profiles/${ctx.botId}`;
         // Reuse the bot's running Chrome if present (opens a new tab), else start one detached.
         return orgo.bash(
           c,
@@ -157,13 +159,13 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'save_file',
-    description: "Save a deliverable (report, notes, CSV, code, markdown) to your Library so the user can open and download it. Saved under /root/grokbot/files/<your id>/ on your computer.",
+    description: `Save a deliverable (report, notes, CSV, code, markdown) to your Library so the user can open and download it. Saved under ${env.boxHome}/files/<your id>/ on your computer.`,
     parameters: obj({ filename: { type: 'string', description: 'e.g. briefing-2026-11-09.md' }, content: { type: 'string' } }, ['filename', 'content']),
     activity: 'drafting_file',
     label: 'Saving notes',
     impl: async (a, ctx) => {
       const name = String(a.filename).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'file.txt';
-      const dir = `/root/grokbot/files/${ctx.botId}`;
+      const dir = `${env.boxHome}/files/${ctx.botId}`;
       const b64 = Buffer.from(String(a.content), 'utf8').toString('base64');
       // Chunk the base64 so very large files don't exceed a single command's size.
       await onScreen(ctx, async (c, s) => {
@@ -176,7 +178,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'shell',
-    description: 'Run a bash command on your own Linux computer (as root). Use for files, scripts, CLIs and quick data work. Output is truncated to 20k characters.',
+    description: 'Run a bash command on your own Linux computer. Use for files, scripts, CLIs and quick data work. Output is truncated to 20k characters.',
     parameters: obj({ command: { type: 'string' }, timeout_seconds: { type: 'integer' } }, ['command']),
     activity: 'running_commands',
     label: 'Running commands',
@@ -341,6 +343,33 @@ export const TOOLS: ToolDef[] = [
       db.prepare('UPDATE tasks SET state=?, note=COALESCE(?, note), updated_at=? WHERE id=? AND bot_id=?').run(a.state, a.note ?? null, now(), a.task_id, ctx.botId);
       hub.emit(ctx.userId, { type: 'tasks', botId: ctx.botId });
       return { output: 'Updated.' };
+    },
+  },
+  {
+    name: 'create_bot',
+    description: "Create a permanent native Bot on the user's Grokbot team when the user asks for a new teammate. It appears in the sidebar and keeps its instructions and context across sessions. This is not an external app connection or a temporary subagent. Pass all relevant user-provided project context, then use send_to_bot to hand it work. An existing name is reused without changing its instructions.",
+    parameters: obj({
+      name: { type: 'string', description: 'Name of the permanent teammate, e.g. 7Oceans' },
+      label: { type: 'string', description: 'Short role or job title' },
+      description: { type: 'string' },
+      instructions: { type: 'string', description: 'Standing instructions for this Bot' },
+      context: { type: 'string', description: 'Self-contained project facts and user context to retain permanently' },
+    }, ['name']),
+    activity: 'working',
+    label: 'Creating a teammate',
+    impl: async (a, ctx) => {
+      const creator = getBotRow(ctx.botId);
+      if (!creator || creator.user_id !== ctx.userId || creator.hidden) return { output: JSON.stringify({ error: 'Only a permanent Bot on your own team can create teammates.' }) };
+      const name = typeof a.name === 'string' ? a.name.trim().slice(0, 60) : '';
+      if (!name) return { output: JSON.stringify({ error: 'A Bot name is required.' }) };
+      const existing = botByName(ctx.userId, name);
+      if (existing) {
+        if (existing.hidden || existing.kind === 'room') return { output: JSON.stringify({ error: 'That name belongs to a helper or group chat. Choose another name.' }) };
+        return { output: JSON.stringify({ created: false, bot_id: existing.id, name: existing.name, note: 'This teammate already exists. Instructions were preserved; use send_to_bot to contact it.' }) };
+      }
+      const instructions = [a.instructions, a.context ? `Project context:\n${a.context}` : ''].filter(Boolean).join('\n\n');
+      const bot = createBot(ctx.userId, { name, label: a.label, description: a.description, instructions });
+      return { output: JSON.stringify({ created: true, bot_id: bot.id, name: bot.name, note: 'Permanent teammate created with the supplied instructions and context. Use send_to_bot to hand it work.' }), summary: `Created ${bot.name}` };
     },
   },
   {

@@ -1,3 +1,42 @@
+# Grokbot Clone — local desktop edition
+
+Public customization of [nickvasilescu/grokbot-clone](https://github.com/nickvasilescu/grokbot-clone).
+This fork runs agent desktops in Docker on your own Linux machine and supports a configurable
+OpenAI Responses API endpoint. The current personal setup uses GPT-6 Luna through a local proxy;
+model availability and access depend on your configured provider.
+
+## Changes in this fork
+
+- Local Docker desktops, browser profiles, file downloads, and a live VNC viewer; no Orgo account required in local mode.
+- Configurable model endpoint, model name, hosted tools, and optional fallback model.
+- Single-owner password login, localhost binding, and private Tailscale deployment guidance.
+- Voice and Google sign-in can be disabled independently; Composio app connections remain available.
+- Native `create_bot` tool for permanent teammates with saved instructions and project context, plus `send_to_bot` for handoff.
+- Clear Composio credential errors with retry controls in Connect Apps.
+
+Start with [`.env.example`](.env.example), the [desktop guide](desktop/README.md), and the
+[deployment guide](deploy/README.md). Run `npm ci` and `npm run build` to install and build.
+For local mode, configure `LLM_API_KEY`, `COMPOSIO_API_KEY` (a developer project key),
+`DESKTOP_TOKEN`, `SESSION_SECRET`, and `OWNER_PASSWORD_HASH`. Generate the password hash with
+`node scripts/hash-password.mjs < /path/to/private-password-file`; put the resulting hash in
+single quotes in `.env` so its dollar signs remain literal.
+
+Run the desktop on the dedicated `grokbot-desktop-net` network (`10.0.20.0/24`, bridge
+`br-grokbot`) with its API published on `127.0.0.1:18090`, then install and verify the firewall
+using the deployment guide before allowing agent work. Choose another subnet if this one is
+already used. Keep `HOST=127.0.0.1` and expose the app with private Tailscale Serve when needed.
+`npm start` serves the built app. Never commit `.env`, passwords, databases, or browser profiles.
+
+Checks: `npm run typecheck`, `npm run build`, and
+`node --import tsx --test tests/permanent-bots.test.mjs` (uses a temporary database).
+
+The original project overview below describes its default Orgo/xAI configuration. This fork's
+local defaults are documented above and in `.env.example`; the original architecture documents
+have not all been updated for the local runtime. MIT licensing and third-party artwork notices
+remain in [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+---
+
 <p align="center">
   <img src="assets/readme-banner.svg" alt="Grokbot Clone — Your team. Their own computers." width="100%">
 </p>
@@ -27,6 +66,7 @@ Grokbot Clone recreates the Grok Bot experience with a runtime you can run and m
 - **Put it to work on a computer.** Bots browse websites, run shell commands, and use a full Linux desktop through Orgo. Watch live, take control, and find saved work in the Library.
 - **Connect your apps.** Google sign-in and app connections run through Composio. Read actions run automatically; Composio write actions pause for approval, with an option to remember your choice.
 - **Build a team.** Bots delegate work, start subagents, and join group chats with @mentions.
+- **Ask a Bot to create a teammate.** The native `create_bot` tool creates a permanent Bot in your sidebar with its role, instructions, and project context. It reuses an existing teammate with the same name without overwriting its instructions; `send_to_bot` can then hand it work. Temporary helpers use `spawn_subagent` instead.
 - **Keep work moving.** Schedule routines, react to app events, and let your primary Bot check in proactively.
 - **Keep context.** Bots retain durable memories, recall earlier facts, and compact long conversations.
 - **Talk it through.** Realtime voice calls hand tasks to the same Bot runtime. Voice selection, speed, previews, and push-to-talk dictation are included.

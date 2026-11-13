@@ -118,6 +118,7 @@ export function DetailsPanel() {
   const bot = useSelectedBot();
   const routines = useStore((s) => (bot ? s.routines[bot.id] : undefined));
   const set = useStore((s) => s.set);
+  const voiceEnabled = useStore((s) => s.features.voice);
   const [tab, setTab] = useState<'activity' | 'tasks' | 'library'>('activity');
   const [hideSuggested, setHideSuggested] = useState(() => { try { return localStorage.getItem('grokbot.hideSuggested') === '1'; } catch { return false; } });
   if (!bot) return null;
@@ -189,10 +190,12 @@ export function DetailsPanel() {
                   <div className="section-label">Computer</div>
                   <ComputerCard bot={bot} />
                 </section>
-                <section>
-                  <div className="section-label">Voice chat</div>
-                  <VoiceSettings bot={bot} />
-                </section>
+                {voiceEnabled && (
+                  <section>
+                    <div className="section-label">Voice chat</div>
+                    <VoiceSettings bot={bot} />
+                  </section>
+                )}
               </>
             )}
           </div>

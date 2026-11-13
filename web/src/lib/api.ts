@@ -1,3 +1,4 @@
+export interface Features { voice: boolean; googleLogin: boolean; passwordLogin: boolean }
 import type { Bot, ComputerState, LiveState, Routine, Row, Toolkit, User } from '@shared/types';
 
 export class ApiError extends Error {
@@ -25,7 +26,8 @@ export interface AppsResponse { apps: Toolkit[]; connected: string[]; categories
 export interface RoomMember { id: string; name: string; label: string; avatarShape: string; avatarColor: string }
 
 export const api = {
-  me: () => req<{ user: User | null; devLogin: boolean }>('GET', '/auth/me'),
+  me: () => req<{ user: User | null; devLogin: boolean; features?: Features }>('GET', '/auth/me'),
+  passwordLogin: (password: string) => req<{ ok: true }>('POST', '/auth/password', { password }),
   devLogin: (email: string, name?: string) => req<{ ok: true }>('POST', '/auth/dev', { email, name }),
   logout: () => req<{ ok: true }>('POST', '/auth/logout'),
 

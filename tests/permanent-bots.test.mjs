@@ -1,0 +1,48 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+const dir = mkdtempSync(join(tmpdir(), 'grokbot-bots-'));
+Object.assign(process.env, { DB_PATH: join(dir, 'test.db'), COMPOSIO_API_KEY: 'test', DESKTOP_TOKEN: 'test', SESSION_SECRET: 'test', LLM_API_KEY: 'test' });
+const { db } = await import('../server/src/db.ts');
+const { initSubagents } = await import('../server/src/agent/subagents.ts');
+initSubagents();
+const { toolMap, functionSchemas } = await import('../server/src/agent/tools.ts');
+const { listBots } = await import('../server/src/store.ts');
+for (const id of ['owner', 'other']) db.prepare('INSERT INTO users(id,email,name,created_at) VALUES (?,?,?,?)').run(id, `${id}@test.invalid`, id, Date.now());
+db.prepare("INSERT INTO bots(id,user_id,name,created_at,updated_at) VALUES ('parent','owner','Chief',0,0)").run();
+const sent = [];
+const ctx = { userId: 'owner', botId: 'parent', depth: 0, enqueueBotMessage: (...args) => sent.push(args) };
+const create = async (args, context = ctx) => {
+  const tool = toolMap.get('create_bot');
+  assert.ok(tool, 'agent must have a native create_bot tool');
+  return JSON.parse((await tool.impl(args, context)).output);
+};
+test('create permanent teammate, preserve context, reuse name, and hand off', async () => {
+  assert.ok(functionSchemas().some(t => t.name === 'create_bot'));
+  const result = await create({ name: '7Oceans', label: 'Project lead', instructions: 'Coordinate the project.', context: 'Preserve legacy workflows. MCP URL will arrive later.' });
+  const bot = db.prepare('SELECT * FROM bots WHERE id=?').get(result.bot_id);
+  assert.equal(bot.user_id, 'owner');
+  assert.equal(bot.hidden, 0);
+  assert.equal(bot.parent_bot_id, null);
+  assert.match(bot.instructions, /Coordinate the project/);
+  assert.match(bot.instructions, /Preserve legacy workflows/);
+  assert.ok(listBots('owner').some(b => b.id === bot.id));
+  const again = await create({ name: '7oceans', instructions: 'Do not overwrite' });
+  assert.equal(again.bot_id, bot.id);
+  assert.equal(again.created, false);
+  assert.equal(db.prepare('SELECT instructions FROM bots WHERE id=?').get(bot.id).instructions, bot.instructions);
+  await toolMap.get('send_to_bot').impl({bot_name: '7Oceans', message: 'Please acknowledge your context.'}, ctx);
+  assert.equal(sent[0][1], bot.id);
+  assert.equal(sent[0][2], 'Please acknowledge your context.');
+});
+test('cannot create for another owner or with a blank name', async () => {
+  const count = db.prepare('SELECT count(*) n FROM bots').get().n;
+  const denied = await create({name: 'Intruder'}, {...ctx, userId: 'other'});
+  assert.ok(denied.error);
+  const blank = await create({name: '  '});
+  assert.ok(blank.error);
+  assert.equal(db.prepare('SELECT count(*) n FROM bots').get().n, count);
+});
+test.after(() => { db.close(); rmSync(dir, {recursive: true, force: true}); });

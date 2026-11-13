@@ -6,6 +6,8 @@ import { TrafficLights } from './Sidebar';
 
 export function SignIn() {
   const devLogin = useStore((s) => s.devLogin);
+  const features = useStore((s) => s.features);
+  const [password, setPassword] = useState('');
   const checkAuth = useStore((s) => s.checkAuth);
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
@@ -19,6 +21,13 @@ export function SignIn() {
     try { await api.devLogin(email.trim(), name.trim() || undefined); await checkAuth(); } catch (err) { setError((err as Error).message); setBusy(false); }
   };
 
+  const owner = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!password) { setError('Enter your password'); return; }
+    setBusy(true); setError(null);
+    try { await api.passwordLogin(password); await checkAuth(); } catch (err) { setError((err as Error).message); setBusy(false); }
+  };
+
   return (
     <div className="signin">
       <div className="signin__chrome"><TrafficLights /></div>
@@ -28,9 +37,17 @@ export function SignIn() {
         </div>
         <h1 className="signin__title">Grokbot</h1>
         <p className="signin__sub">AI teammates with their own computers. Hand them a task and they get it done.</p>
-        <a className="btn btn--primary signin__google" href="/api/auth/google/start">
-          <GoogleG /> Sign in with Google
-        </a>
+        {features.passwordLogin && (
+          <form className="signin__dev" onSubmit={owner}>
+            <input className="text-input" type="password" autoComplete="current-password" autoFocus placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} aria-label="Password" />
+            <button type="submit" className="btn btn--primary" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+          </form>
+        )}
+        {features.googleLogin && (
+          <a className="btn btn--primary signin__google" href="/api/auth/google/start">
+            <GoogleG /> Sign in with Google
+          </a>
+        )}
         {devLogin && (
           <form className="signin__dev" onSubmit={dev}>
             <div className="signin__divider"><span>Dev sign-in</span></div>
