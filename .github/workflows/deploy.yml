@@ -1,0 +1,90 @@
+name: Build and Deploy
+
+# Grid deploy standard: runbooks/grid-deploy-reference.md in hivemind-docs.
+# Two images from one repository: the app (root Dockerfile) and the browser
+# desktop sidecar (desktop/Dockerfile, unchanged from upstream).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  ORG: hivemind-network-ltd
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: hivebot
+            context: .
+            dockerfile: Dockerfile
+          - image: hivebot-desktop
+            context: desktop
+            dockerfile: Dockerfile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.ORG }}/${{ matrix.image }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.context }}/${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HIVEBOT_DEPLOY_ENABLED == 'true'
+    permissions:
+      contents: read
+    steps:
+      # Gated on the repository variable HIVEBOT_DEPLOY_ENABLED. Nothing on the
+      # Grid can be recreated until apps/hivebot/params.json is merged in
+      # hive-deploy-infra and /admin/reload has rendered it, so an ungated deploy
+      # would only produce a red run against an unknown slug. Set the variable to
+      # 'true' after that PR lands, then dispatch this workflow once.
+      - name: Trigger deploy on grid server
+        env:
+          DEPLOY_WEBHOOK_SECRET: ${{ secrets.DEPLOY_WEBHOOK_SECRET }}
+        run: |
+          set -eo pipefail
+          # The secret reaches curl on stdin (-H @-): not on its command line,
+          # and not interpolated into the script text.
+          resp=$(printf 'X-Hive-Secret: %s\n' "$DEPLOY_WEBHOOK_SECRET" | curl -sS -w '\nHTTP_STATUS=%{http_code}' \
+            -X POST https://deploy.grid.hivemindnetwork.com/deploy/hivebot \
+            -H @-)
+          echo "$resp"
+          status=$(echo "$resp" | sed -n 's/^HTTP_STATUS=//p')
+          if [ "${status:-0}" -lt 200 ] || [ "${status:-0}" -ge 300 ]; then
+            echo "::error::deploy webhook returned HTTP $status"
+            exit 1
+          fi

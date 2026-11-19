@@ -1,8 +1,10 @@
-// Probe CLIProxyAPI with the request shapes grokbot's agent loop uses.
+// Probe the configured model endpoint with the request shapes grokbot's agent loop uses.
+// Reads LLM_BASE_URL / LLM_MODEL from the environment when set, so the same script works
+// against the local CLIProxyAPI, xAI and DeepSeek (which serves an OpenAI Responses surface).
 import OpenAI from 'openai';
 const key = process.env.LLM_API_KEY;
-const model = process.argv[2] ?? 'gpt-6-luna';
-const c = new OpenAI({ apiKey: key, baseURL: 'http://127.0.0.1:8317/v1', timeout: 120000 });
+const model = process.argv[2] ?? process.env.LLM_MODEL ?? 'gpt-6-luna';
+const c = new OpenAI({ apiKey: key, baseURL: process.env.LLM_BASE_URL ?? 'http://127.0.0.1:8317/v1', timeout: 120000 });
 const fn = { type: 'function', name: 'computer_screenshot', description: 'Take a screenshot', parameters: { type: 'object', properties: {}, required: [], additionalProperties: false } };
 // 1x1 red PNG
 const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';

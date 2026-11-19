@@ -1,0 +1,22 @@
+# Fragments to add to hive-deploy-infra/templates/compose-header.yml
+# (not a standalone file — the header is the only place top-level networks and
+# named volumes may be declared; a rawBlock that introduces one fails
+# `docker compose config` for the whole stack).
+#
+# Add under `networks:` (alphabetical-ish, next to codebeam-egress / voice-meet-internal):
+
+  # hivebot (apps/hivebot, HIVA-26487) — the app and its browser desktop, and
+  # nothing else. NOT `internal: true` on purpose: both services need public
+  # egress (DeepSeek, Composio, general browsing), and `internal` removes the
+  # gateway. Isolation comes from neither service joining `default`, so no other
+  # Grid app can reach the desktop's shell API on 8090. Inbound is only the
+  # Tailscale-IP published port on the app. Same shape as codebeam-egress and
+  # voice-meet-internal.
+  hivebot-net:
+
+# Add under `volumes:`:
+
+  # SQLite database (WAL), the whole product state for hivebot.
+  hivebot-data:
+  # Browser profiles and downloaded files for the desktop container.
+  hivebot-desktop-data:

@@ -1,0 +1,46 @@
+{
+  "slug": "hivebot",
+  "displayName": "hivebot",
+  "stack": "node",
+  "image": "ghcr.io/hivemind-network-ltd/hivebot:latest",
+  "port": 8787,
+  "// domain": "Intentionally null for the pilot: the app is not routed through Traefik and has no public DNS name. Access is the Tailscale-IP port published below (http://100.71.130.57:8787). When the public flip happens, set this to hivebot.hivemindnetwork.com, add the four router labels to the app service, and create the explicit A record BEFORE the first certificate request.",
+  "domain": null,
+  "extraDomains": [],
+  "envFile": "./hivebot/.env",
+  "envVarNames": [
+    "LLM_BASE_URL",
+    "LLM_API_KEY",
+    "LLM_MODEL",
+    "LLM_FALLBACK_MODEL",
+    "LLM_BUILTIN_TOOLS",
+    "COMPOSIO_API_KEY",
+    "SESSION_SECRET",
+    "OWNER_EMAIL",
+    "OWNER_NAME",
+    "OWNER_PASSWORD_HASH",
+    "APP_URL",
+    "SERVER_URL",
+    "HOST",
+    "PORT",
+    "DB_PATH",
+    "DESKTOP_URL",
+    "DESKTOP_TOKEN",
+    "COMPUTER_PROVIDER",
+    "VOICE_ENABLED",
+    "GOOGLE_LOGIN",
+    "DEV_LOGIN"
+  ],
+  "authMode": "bios",
+  "cspFrameAncestors": [],
+  "// authMode": "grid-app-auth.md defines \"bios\" as \"the app enforces its own authentication\"; the name is generic, not BIOS-SSO-specific. This app enforces a single-owner scrypt password login plus its own session cookie. BIOS SSO was considered and deliberately deferred (HIVA-26487).",
+  "deployCommands": [
+    "cd /srv/stack && docker compose pull hivebot hivebot-desktop",
+    "cd /srv/stack && docker compose up -d hivebot hivebot-desktop"
+  ],
+  "// smokeCheck": "hive-deploy treats any 4xx as healthy by default (HIVA-19789 lesson). The app serves the built SPA at / and /api/health returns 200, so demand < 400. For an unrouted app the probe has no edge hostname; if the renderer skips the check for a null domain, that is expected and not a pass.",
+  "smokeCheck": {
+    "max_status": 399
+  },
+  "rawBlock": "  # -- hivebot -------------------------------------------------------------\n  # Self-hosted agent-team app (HiveMind-Network-Ltd/hivebot, a fork of\n  # Zburgers/grokbot-clone, MIT) plus its browser desktop. HIVA-26487.\n  #\n  # TWO SERVICES, TWO IMAGES:\n  #   hivebot          Hono server + built React app on 8787. The only container\n  #                    that holds credentials (LLM key, Composio key, session\n  #                    secret, owner password hash).\n  #   hivebot-desktop  Xvfb/openbox/Chromium/desktopd on 8090, from the repo's\n  #                    own desktop/Dockerfile. Unrouted, unpublished, and given\n  #                    ONLY desktop.env, so it holds no application credential.\n  #                    It is the container that runs shell commands and drives a\n  #                    browser, so the split is the containment: an app-side bug\n  #                    cannot already be a browser-with-keys bug, and the reverse\n  #                    is true as well.\n  #\n  # NETWORK. `hivebot-net` (declared in templates/compose-header.yml, NOT\n  # internal — both services need public egress: DeepSeek, Composio, and general\n  # browsing) is joined by these two services and nothing else. Neither joins\n  # `default`, so no other Grid app can reach the desktop's shell API. Precedent\n  # for a non-internal, non-default network with a Tailscale-IP published port:\n  # voice-meet-internal and codebeam-egress.\n  #\n  # EXPOSURE. Tailscale-only for the pilot, by Lyndon's decision (HIVA-26487):\n  # the port binds 100.71.130.57, never 0.0.0.0, so there is no public listener.\n  # traefik.enable=false on both. No DNS record and no certificate exist for\n  # this app yet. Container -> Tailnet egress remains default-denied by\n  # scripts/docker-tailnet-guard.sh; no allow row is needed because the model\n  # endpoint is public.\n  #\n  # env_file is required: false on purpose, exactly as for hm-mail and\n  # hive-drop: /admin/reload validates the WHOLE stack with `docker compose\n  # config -q`, and a required env_file that an operator has not placed yet\n  # fails the render with 422 and queues every other merged change behind it.\n  # With required: false the container starts and serves 500s until the file\n  # exists and the service is recreated.\n  #\n  # Runtime config, two operator-placed files (mode 640, deploy:deploy):\n  #   ./hivebot/.env          app only — every name in envVarNames above\n  #   ./hivebot/desktop.env   desktop only — DESKTOP_TOKEN (must equal the app's\n  #                           copy) and optionally RESOLUTION\n  # Do not merge them. The desktop must never receive LLM_API_KEY,\n  # COMPOSIO_API_KEY, SESSION_SECRET or OWNER_PASSWORD_HASH.\n  #\n  # HOST=0.0.0.0 inside the container; exposure is the port binding below.\n  # APP_URL/SERVER_URL must equal the URL actually used (cookie `Secure` is set\n  # only when APP_URL starts with https, so an http pilot and a later https\n  # cutover are deliberately different configurations).\n  #\n  # MEMORY. 768m app / 2560m desktop (the desktop's own documented profile, with\n  # 1g /dev/shm for Chromium). Total ~3.3 GiB at limits on a 16 GiB host.\n  # Single replica only: SQLite WAL, an in-process cron scheduler and an\n  # in-memory login-failure counter all assume one process.\n  hivebot:\n    image: ghcr.io/hivemind-network-ltd/hivebot:latest\n    mem_limit: 768m\n    restart: unless-stopped\n    env_file:\n    - path: ./hivebot/.env\n      required: false\n    volumes:\n    - hivebot-data:/data\n    networks:\n    - hivebot-net\n    ports:\n    - \"100.71.130.57:8787:8787\"\n    cap_drop:\n    - ALL\n    security_opt:\n    - no-new-privileges:true\n    labels:\n    - traefik.enable=false\n  hivebot-desktop:\n    image: ghcr.io/hivemind-network-ltd/hivebot-desktop:latest\n    mem_limit: 2560m\n    cpus: 2.0\n    pids_limit: 512\n    shm_size: \"1g\"\n    restart: unless-stopped\n    env_file:\n    - path: ./hivebot/desktop.env\n      required: false\n    volumes:\n    - hivebot-desktop-data:/home/agent/grokbot\n    networks:\n    - hivebot-net\n    cap_drop:\n    - ALL\n    security_opt:\n    - no-new-privileges:true\n    labels:\n    - traefik.enable=false\n"
+}
